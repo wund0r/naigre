@@ -21,7 +21,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.Process
 import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.text.Editable
@@ -77,12 +76,21 @@ import wund0r.naigre.reader.render.PageTurnMode
 import wund0r.naigre.reader.render.ReaderSurface
 import wund0r.naigre.reader.render.MarkdownSurface
 import wund0r.naigre.reader.render.SpreadLayout
-import wund0r.naigre.reader.search.ExtractedTextPage
+import wund0r.naigre.reader.search.TextIndexCoordinator
+import wund0r.naigre.reader.search.TextIndexEvent
+import wund0r.naigre.reader.search.TextSearchCompletion
 import wund0r.naigre.reader.search.TextSearchHit
 import wund0r.naigre.reader.search.TextSearchIndexRepository
+import wund0r.naigre.reader.search.TextSearchQueryRunner
+import wund0r.naigre.reader.search.TextSearchRequest
 import wund0r.naigre.reader.search.TextSearchSnapshot
 import wund0r.naigre.reader.table.BookRecord
-import wund0r.naigre.reader.table.BookLibraryRepository
+import wund0r.naigre.reader.table.BookOperationToken
+import wund0r.naigre.reader.table.BookCatalogState
+import wund0r.naigre.reader.table.BookIndexLoadResult
+import wund0r.naigre.reader.table.BookLibraryState
+import wund0r.naigre.reader.table.BookLibraryStorage
+import wund0r.naigre.reader.table.BookStorageFailure
 import wund0r.naigre.reader.table.CURRENT_BOOK_INDEX_VERSION
 import wund0r.naigre.reader.table.DocumentMetadata
 import wund0r.naigre.reader.table.DocumentMetadataReader
@@ -90,21 +98,21 @@ import wund0r.naigre.reader.table.ImageFileRecord
 import wund0r.naigre.reader.table.LibraryFolderRecord
 import wund0r.naigre.reader.table.LibraryItemKind
 import wund0r.naigre.reader.table.LibraryTagRecord
+import wund0r.naigre.reader.table.TableSelectionTransition
+import wund0r.naigre.reader.table.TableSessionController
+import wund0r.naigre.reader.table.mergeHydratedBookIndex
+import wund0r.naigre.reader.table.mergeSourceBookResult
 import wund0r.naigre.reader.table.sourceRevisionKey
 import wund0r.naigre.reader.table.sourceMetadataChanged
 import wund0r.naigre.reader.table.sourceMetadataChangeSummary
 import wund0r.naigre.reader.table.sourceMetadataNeedsUpdate
 import wund0r.naigre.reader.theme.ReaderThemeMode
 import wund0r.naigre.reader.theme.UiPalette
+import wund0r.naigre.reader.work.ReaderWorkCoordinator
 import java.util.UUID
 import java.util.ArrayDeque
 import java.util.IdentityHashMap
 import java.util.Locale
-import java.util.concurrent.Executors
-import java.util.concurrent.Future
-import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 import java.security.MessageDigest
 import kotlin.math.max
 import kotlin.math.min
@@ -116,6 +124,9 @@ class MainActivity : Activity() {
         private const val CHROME_SURFACE_HEIGHT_DP = 44
         private const val CHROME_VERTICAL_INSET_DP =
             (CHROME_TOUCH_SIZE_DP - CHROME_SURFACE_HEIGHT_DP) / 2
+        private const val SEARCH_TAB_TRAILING_SPACE_DP = CHROME_TOUCH_SIZE_DP + 8
+        private const val REFERENCE_SEARCH_CONTENT_TOP_DP = 64
+        private const val REFERENCE_SEARCH_EDIT_WIDTH_DP = 64
         private const val NAVIGATE_RESULT_PAGE_SIZE = 100
         private const val REQUEST_OPEN_DOCUMENT = 1001
         private const val REQUEST_OPEN_TOC = 1002
@@ -168,6 +179,11 @@ class MainActivity : Activity() {
         TEXT,
     }
 
+    private enum class TextSearchRefreshReason {
+        EXPLICIT,
+        INDEX_PROGRESS,
+    }
+
     private enum class ReaderLayoutMode(val label: String) {
         AUTOMATIC("Automatic"),
         WIDE("Wide"),
@@ -187,6 +203,7 @@ class MainActivity : Activity() {
     )
 
     private data class TextSearchSession(
+        val id: String = UUID.randomUUID().toString(),
         val query: String,
         var scopeBookId: String?,
         var bookIds: List<String>,
@@ -198,6 +215,7 @@ class MainActivity : Activity() {
         var readyBooks: Int = 0,
         var searchInFlight: Boolean = false,
         var error: String? = null,
+        var appliedSourceRevisions: Map<String, String> = emptyMap(),
         val preciseContexts: MutableMap<String, BookmarkEntry?> = HashMap(),
     )
 
@@ -262,16 +280,10 @@ class MainActivity : Activity() {
         val unchangedCount: Int,
         val skipped: List<String>,
         val failures: List<String>,
+        val contentSnapshots: Map<String, BookOperationToken>,
     )
 
-    private val renderWorker = Executors.newSingleThreadExecutor()
-    private val prefetchWorker = Executors.newSingleThreadExecutor()
-    private val textIndexWorker = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "naigre-text-index")
-    }
-    private val textSearchWorker = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "naigre-text-query")
-    }
+    private val readerWork = ReaderWorkCoordinator.create()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile private var pdf: PdfDocument? = null
@@ -294,6 +306,9 @@ class MainActivity : Activity() {
     @Volatile private var lastLinkDiagnostic = "No link followed in this process"
     @Volatile private var lastSourceRefreshDiagnostic = "No source refresh in this process"
     @Volatile private var lastTextSearchDiagnostic = "No full-text search in this process"
+    @Volatile private var lastStorageDiagnostic = "Library storage has not completed a request"
+    @Volatile private var lastReferenceRenderDiagnostic = "No reference rendered in this process"
+    @Volatile private var lastFolderScanDiagnostic = "No folder scan in this process"
 
     private lateinit var pageCache: PageBitmapCache
     private lateinit var imageDecodePolicy: ImageDecodePolicy
@@ -304,17 +319,26 @@ class MainActivity : Activity() {
 
     private val bookmarkIndex = BookmarkIndex()
     private val bookmarkVisitCounts = HashMap<String, Int>()
-    private lateinit var bookRepository: BookLibraryRepository
+    private lateinit var libraryStorage: BookLibraryStorage
     private lateinit var documentMetadataReader: DocumentMetadataReader
     private lateinit var readerSessionRepository: ReaderSessionRepository
     private lateinit var textSearchIndex: TextSearchIndexRepository
+    private lateinit var textIndexCoordinator: TextIndexCoordinator
+    private lateinit var textSearchQueryRunner: TextSearchQueryRunner
     private lateinit var markdownEngine: MarkdownEngine
+    private lateinit var maintenanceMarkdownEngine: MarkdownEngine
+    private val tableSessionController = TableSessionController()
     private val books = mutableListOf<BookRecord>()
     private val libraryFolders = mutableListOf<LibraryFolderRecord>()
     private val libraryTags = mutableListOf<LibraryTagRecord>()
-    private val selectedBookIds = linkedSetOf<String>()
+    private val selectedBookIds: Set<String>
+        get() = tableSessionController.selectedBookIds
     private val unavailableBookIds = HashSet<String>()
     private val unavailableBookErrors = HashMap<String, String>()
+    private val bookIndexLoadErrors = HashMap<String, String>()
+    private var catalogState: BookCatalogState = BookCatalogState.Loading
+    private var catalogLoadGeneration = 0L
+    private var pendingTabRestoreState: Bundle? = null
     private var pendingTocBookId: String? = null
     private var pendingRelinkBookId: String? = null
     private var libraryDialog: Dialog? = null
@@ -324,25 +348,23 @@ class MainActivity : Activity() {
     private var libraryEmptyLabel: TextView? = null
     private var libraryVisibleBooks: List<BookRecord> = emptyList()
     private var libraryFilter = LibraryFilter(LibraryFilterKind.ALL)
-    private var bulkTableSelectionGeneration = 0L
     private var hasResumed = false
     private var folderScanInProgress = false
     private var searchMode = SearchMode.BOOKMARKS
     private var searchScopeBookId: String? = null
     private var textSearchSession: TextSearchSession? = null
-    private var textSearchQueryGeneration = 0L
-    private var textSearchFuture: Future<*>? = null
+    private var textSearchRequestSequence = 0L
     private val textSearchProgressRefresh = Runnable {
-        if (!destroying && textSearchSession != null) refreshTextSearchResults()
+        if (!destroying && textSearchSession != null) {
+            refreshTextSearchResults(TextSearchRefreshReason.INDEX_PROGRESS)
+        }
     }
-    private val textIndexTokens = ConcurrentHashMap<String, Long>()
-    private val textIndexTokenSequence = AtomicLong()
-    private val textIndexErrors = ConcurrentHashMap<String, String>()
     @Volatile private var activeSearchHighlight: SearchHighlightTarget? = null
     @Volatile private var searchHighlightGeneration = 0L
 
     private val tabs = mutableListOf<ReaderTab>()
     private var activeTabIndex = 0
+    private val tabSearchHighlights = HashMap<String, SearchHighlightTarget>()
     private val primaryImageViewports = IdentityHashMap<ReaderTab, MutableMap<String, ReaderSurface.ViewportState>>()
     private val referenceImageViewports = HashMap<String, ReaderSurface.ViewportState>()
     private val primaryMarkdownViewports = IdentityHashMap<ReaderTab, MarkdownSurface.ViewportState>()
@@ -368,17 +390,33 @@ class MainActivity : Activity() {
     private lateinit var emptyHint: TextView
     private lateinit var sourceRecoveryActions: LinearLayout
     private lateinit var sourceRelinkButton: Button
+    private lateinit var catalogRecoveryActions: LinearLayout
     private lateinit var readerSurface: ReaderSurface
     private lateinit var referenceSurface: ReaderSurface
     private lateinit var primaryMarkdownSurface: MarkdownSurface
     private lateinit var referenceMarkdownSurface: MarkdownSurface
     private lateinit var referenceSearchContainer: LinearLayout
-    private lateinit var referenceSearchTitle: TextView
+    private lateinit var referenceSearchEditButton: Button
     private lateinit var referenceSearchScopeRow: LinearLayout
     private lateinit var referenceSearchStatus: TextView
     private lateinit var referenceSearchMoreButton: Button
     private lateinit var referenceSearchList: ListView
     private lateinit var textSearchResultAdapter: BaseAdapter
+
+    private val textIndexListener = TextIndexCoordinator.Listener { bookId, event ->
+        if (!destroying) {
+            if (event == TextIndexEvent.DELETED) {
+                bookById(bookId)
+                    ?.takeIf { it.id in selectedBookIds && isTextSearchable(it) }
+                    ?.let(::scheduleBookTextIndex)
+            }
+            notifyTextIndexProgress(bookId)
+        }
+    }
+
+    private val bookStorageListener = BookLibraryStorage.Listener { failure ->
+        if (!destroying) handleBookStorageFailure(failure)
+    }
 
     @Volatile private var referenceLocation: ReferenceLocation? = null
     private var primaryDisplayedPageKeys: Set<PageCacheKey> = emptySet()
@@ -420,39 +458,190 @@ class MainActivity : Activity() {
                 prefs.getString(PREF_READER_LAYOUT, ReaderLayoutMode.AUTOMATIC.name)!!,
             )
         }.getOrDefault(ReaderLayoutMode.AUTOMATIC)
-        bookRepository = BookLibraryRepository(this)
+        libraryStorage = BookLibraryStorage.shared(this)
+        libraryStorage.addListener(bookStorageListener)
         documentMetadataReader = DocumentMetadataReader(this)
         readerSessionRepository = ReaderSessionRepository(this)
         textSearchIndex = TextSearchIndexRepository.shared(this)
+        textIndexCoordinator = TextIndexCoordinator.shared(this)
+        textIndexCoordinator.addListener(textIndexListener)
+        textSearchQueryRunner = TextSearchQueryRunner.create(
+            repository = textSearchIndex,
+            dispatchCompletion = { mainHandler.post(it) },
+            listener = ::handleTextSearchCompletion,
+        )
         markdownEngine = MarkdownEngine(this)
-        try {
-            val library = bookRepository.load()
-            books += library.books
-            selectedBookIds += library.selectedBookIds
-            libraryFolders += library.folders
-            libraryTags += library.tags
-        } catch (t: Throwable) {
-            Toast.makeText(this, "Could not read the library: ${t.message}", Toast.LENGTH_LONG).show()
-        }
-        restoreTabs(savedInstanceState)
+        // Markwon parsing is serialized inside MarkdownEngine. Keep maintenance parsing from
+        // contending with primary/reference note opens on their interactive workers.
+        maintenanceMarkdownEngine = MarkdownEngine(this)
         bookmarkVisitCounts.putAll(readerSessionRepository.loadBookmarkVisits())
-        rebuildBookmarkIndex()
+        pendingTabRestoreState = savedInstanceState
 
         buildUi()
+        setStatus("Loading library…")
+        rebuildBookmarkIndex()
+        updateEmptyState()
+        loadLibraryCatalog()
+    }
 
-        if (tabs.isNotEmpty()) {
-            activateCurrentTab()
-        } else {
-            setStatus(if (books.isEmpty()) "Add a file or folder to start" else "Select a library item to start")
-            updateEmptyState()
-            if (selectedBookIds.isEmpty()) mainHandler.post { showLibrary() }
+    private fun loadLibraryCatalog() {
+        val generation = ++catalogLoadGeneration
+        catalogState = BookCatalogState.Loading
+        setStatus("Loading library…")
+        updateNavigationControls()
+        updateEmptyState()
+        libraryStorage.loadCatalog { result ->
+            if (destroying || isDestroyed || generation != catalogLoadGeneration) return@loadCatalog
+            catalogState = result
+            when (result) {
+                BookCatalogState.Loading -> return@loadCatalog
+                BookCatalogState.Missing -> applyLoadedLibrary(
+                    BookLibraryState(emptyList(), linkedSetOf(), emptyList(), emptyList()),
+                    newCatalog = true,
+                )
+                is BookCatalogState.Loaded -> applyLoadedLibrary(result.library, newCatalog = false)
+                is BookCatalogState.Failed -> {
+                    lastStorageDiagnostic = "Catalog load failed: ${result.failure.message}"
+                    setStatus(lastStorageDiagnostic)
+                    updateNavigationControls()
+                    updateEmptyState()
+                }
+            }
         }
-        mainHandler.post { scheduleSelectedBookTextIndexes() }
+    }
+
+    private fun applyLoadedLibrary(library: BookLibraryState, newCatalog: Boolean) {
+        lastStorageDiagnostic = if (newCatalog) {
+            "No saved catalog; initialized an empty library"
+        } else {
+            "Catalog loaded · ${library.books.size} items"
+        }
+        books.clear()
+        books += library.books
+        libraryFolders.clear()
+        libraryFolders += library.folders
+        libraryTags.clear()
+        libraryTags += library.tags
+        tableSessionController.restoreSelection(library.selectedBookIds, books.map { it.id })
+        tabs.clear()
+        tabSearchHighlights.clear()
+        restoreTabs(pendingTabRestoreState)
+        pendingTabRestoreState = null
+        bookIndexLoadErrors.clear()
+        rebuildBookmarkIndex()
+        refreshLibraryUi()
+        renderTabBar()
+        updateNavigationControls()
+        updateEmptyState()
+
+        when {
+            selectedBookIds.isNotEmpty() -> hydrateInitialTableIndexes()
+            books.isEmpty() -> {
+                setStatus(if (newCatalog) "Library is ready" else "Library is empty")
+                updateEmptyState()
+                mainHandler.post { if (!destroying && catalogReady()) showLibrary() }
+            }
+            else -> {
+                setStatus("Select a library item to start")
+                updateEmptyState()
+            }
+        }
+    }
+
+    private fun hydrateInitialTableIndexes() {
+        val generation = catalogLoadGeneration
+        val activeId = activeTabOrNull()?.bookId
+        val requests = selectedBooks()
+            .filterNot { it.indexLoaded }
+            .sortedBy { if (it.id == activeId) 0 else 1 }
+        if (requests.isEmpty()) {
+            if (tabs.isNotEmpty()) activateCurrentTab()
+            scheduleSelectedBookTextIndexes()
+            return
+        }
+        setStatus("Loading ${requests.size} table index${if (requests.size == 1) "" else "es"}…")
+        requests.forEach { snapshot ->
+            val selectionVersion = tableSessionController.selectionVersion(snapshot.id)
+            val contentToken = tableSessionController.captureContentOperation(snapshot.id)
+            libraryStorage.loadIndex(snapshot) { result ->
+                if (
+                    destroying || isDestroyed || generation != catalogLoadGeneration ||
+                    !tableSessionController.selectionStillCurrent(
+                        snapshot.id,
+                        selectionVersion,
+                        selected = true,
+                    ) || !tableSessionController.isContentOperationCurrent(contentToken)
+                ) return@loadIndex
+                val current = bookById(snapshot.id) ?: return@loadIndex
+                when (result) {
+                    is BookIndexLoadResult.Loaded -> {
+                        val merged = mergeHydratedBookIndex(current, result.book)
+                        replaceBook(merged)
+                        bookIndexLoadErrors.remove(snapshot.id)
+                        scheduleBookTextIndex(merged)
+                        if (activeTabOrNull()?.bookId == snapshot.id && pdf == null) {
+                            activateCurrentTab()
+                        }
+                    }
+                    is BookIndexLoadResult.Missing -> {
+                        bookIndexLoadErrors[snapshot.id] = "Stored item index is missing"
+                        recoverActiveBookWithMissingIndex(current, "Stored item index is missing")
+                    }
+                    is BookIndexLoadResult.Failed -> {
+                        val reason = "Stored item index could not be read: ${result.message}"
+                        bookIndexLoadErrors[snapshot.id] = reason
+                        recoverActiveBookWithMissingIndex(current, reason)
+                    }
+                }
+                rebuildBookmarkIndex()
+                refreshLibraryUi()
+                updateEmptyState()
+            }
+        }
+    }
+
+    private fun recoverActiveBookWithMissingIndex(book: BookRecord, reason: String) {
+        if (activeTabOrNull()?.bookId != book.id) return
+        if (book.kind == LibraryItemKind.IMAGE_COLLECTION) {
+            unavailableBookIds += book.id
+            unavailableBookErrors[book.id] = "$reason. Rescan its campaign folder."
+            return
+        }
+        setStatus("$reason · rebuilding ${book.title}…")
+        activateCurrentTab(
+            forceReload = true,
+            forceMetadataRefresh = true,
+            refreshReason = reason,
+        )
+    }
+
+    private fun catalogReady(): Boolean =
+        catalogState is BookCatalogState.Loaded || catalogState is BookCatalogState.Missing
+
+    private fun requireCatalogReady(): Boolean {
+        if (catalogReady()) return true
+        val message = when (val state = catalogState) {
+            BookCatalogState.Loading -> "Library is still loading"
+            is BookCatalogState.Failed -> "Library could not be loaded. Retry from the recovery panel."
+            else -> "Library is not ready"
+        }
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        return false
+    }
+
+    private fun handleBookStorageFailure(failure: BookStorageFailure) {
+        lastStorageDiagnostic = buildString {
+            append(failure.operation.label)
+            failure.bookId?.let { id -> append(" · ${bookById(id)?.title ?: id}") }
+            append(": ${failure.message}")
+        }
+        setStatus(lastStorageDiagnostic)
+        showError("${failure.operation.label} failed", IllegalStateException(failure.message))
     }
 
     override fun onResume() {
         super.onResume()
-        if (hasResumed) checkActiveSourceFreshness()
+        if (hasResumed && catalogReady()) checkActiveSourceFreshness()
         hasResumed = true
     }
 
@@ -537,12 +726,11 @@ class MainActivity : Activity() {
             prefetchPdf = null
             prefetchBookId = null
         }
-        renderWorker.shutdown()
-        prefetchWorker.shutdown()
+        readerWork.shutdown()
         mainHandler.removeCallbacks(textSearchProgressRefresh)
-        textSearchFuture?.cancel(true)
-        textIndexWorker.shutdownNow()
-        textSearchWorker.shutdownNow()
+        textSearchQueryRunner.close()
+        textIndexCoordinator.removeListener(textIndexListener)
+        libraryStorage.removeListener(bookStorageListener)
         pageCache.clear()
         super.onDestroy()
     }
@@ -652,51 +840,10 @@ class MainActivity : Activity() {
 
         referenceSearchContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(70), dp(12), dp(10))
+            setPadding(dp(12), dp(REFERENCE_SEARCH_CONTENT_TOP_DP), dp(12), dp(10))
             setBackgroundColor(uiPalette.surface)
             visibility = View.GONE
         }
-        val searchResultsHeader = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        referenceSearchTitle = TextView(this).apply {
-            textSize = 18f
-            maxLines = 2
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(uiPalette.textPrimary)
-        }
-        searchResultsHeader.addView(
-            referenceSearchTitle,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-        )
-        searchResultsHeader.addView(Button(this).apply {
-            text = "Edit"
-            textSize = 14f
-            isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
-            minHeight = 0
-            minimumHeight = 0
-            setPadding(dp(10), 0, dp(10), 0)
-            setTextColor(uiPalette.textPrimary)
-            background = chromeButtonBackground(uiPalette.surfaceRaised)
-            contentDescription = "Edit full-text search"
-            setOnClickListener {
-                searchMode = SearchMode.TEXT
-                showBookmarkSearch(textSearchSession?.query.orEmpty())
-            }
-        }, LinearLayout.LayoutParams(dp(64), dp(48)))
-        referenceSearchContainer.addView(
-            searchResultsHeader,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                bottomMargin = dp(8)
-            },
-        )
-
         referenceSearchScopeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -710,12 +857,13 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 ),
             )
-        })
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
 
         referenceSearchStatus = TextView(this).apply {
             textSize = 12f
+            maxLines = 2
+            gravity = Gravity.CENTER_VERTICAL
             setTextColor(uiPalette.textSecondary)
-            setPadding(0, dp(3), 0, dp(7))
         }
         referenceSearchMoreButton = Button(this).apply {
             text = "Show more"
@@ -749,13 +897,13 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             addView(
                 referenceSearchStatus,
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
             )
             addView(
                 referenceSearchMoreButton,
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)),
             )
-        })
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
 
         referenceSearchList = ListView(this).apply {
             divider = ColorDrawable(uiPalette.divider)
@@ -846,6 +994,28 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(12) },
+        )
+        catalogRecoveryActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            addView(
+                recoveryButton("Retry library") { loadLibraryCatalog() },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)),
+            )
+            addView(
+                recoveryButton("Diagnostics") { showDiagnostics() },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)).apply {
+                    marginStart = dp(6)
+                },
+            )
+        }
+        emptyStateContainer.addView(
+            catalogRecoveryActions,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) },
         )
         root.addView(
@@ -917,18 +1087,27 @@ class MainActivity : Activity() {
         )
         applyTabStripLayout()
 
-        // Search is deliberately outside bottomChrome: it remains reachable at the
-        // same physical position even while the primary tab strip is hidden.
+        // Search overlays the trailing edge of the full-width tab scroller instead of consuming
+        // tab width. A trailing spacer lets the final tab scroll completely out from beneath it.
         searchButton = ImageButton(this).apply {
             setImageResource(android.R.drawable.ic_menu_search)
             setColorFilter(uiPalette.textPrimary)
             minimumWidth = 0
             minimumHeight = 0
             setPadding(0, 0, 0, 0)
-            contentDescription = "Search bookmarks, filenames, or document text"
+            contentDescription = "Search bookmarks and filenames. Hold for full-text search"
+            tooltipText = "Tap: Navigate · hold: Full text"
             background = chromeButtonBackground(colorWithAlpha(uiPalette.surface, 0xe6))
             isEnabled = false
-            setOnClickListener { showBookmarkSearch() }
+            setOnClickListener {
+                searchMode = SearchMode.BOOKMARKS
+                showBookmarkSearch()
+            }
+            setOnLongClickListener {
+                searchMode = SearchMode.TEXT
+                showBookmarkSearch()
+                true
+            }
         }
         root.addView(
             searchButton,
@@ -937,7 +1116,7 @@ class MainActivity : Activity() {
                 dp(CHROME_TOUCH_SIZE_DP),
                 Gravity.BOTTOM or Gravity.END,
             ).apply {
-                bottomMargin = dp(68)
+                bottomMargin = dp(8 - CHROME_VERTICAL_INSET_DP)
                 marginEnd = dp(8)
             },
         )
@@ -980,6 +1159,36 @@ class MainActivity : Activity() {
             },
         )
 
+        referenceSearchEditButton = Button(this).apply {
+            text = "Edit"
+            textSize = 14f
+            isAllCaps = false
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(dp(10), 0, dp(10), 0)
+            setTextColor(uiPalette.textPrimary)
+            background = chromeButtonBackground(uiPalette.surfaceRaised)
+            contentDescription = "Edit full-text search"
+            visibility = View.GONE
+            setOnClickListener {
+                searchMode = SearchMode.TEXT
+                showBookmarkSearch(textSearchSession?.query.orEmpty())
+            }
+        }
+        referencePane.addView(
+            referenceSearchEditButton,
+            FrameLayout.LayoutParams(
+                dp(REFERENCE_SEARCH_EDIT_WIDTH_DP),
+                dp(CHROME_TOUCH_SIZE_DP),
+                Gravity.TOP or Gravity.START,
+            ).apply {
+                marginStart = dp(8)
+                topMargin = dp(8)
+            },
+        )
+
         referenceIndicatorTitle = TextView(this).apply {
             textSize = 14f
             maxLines = 1
@@ -1018,11 +1227,15 @@ class MainActivity : Activity() {
         referenceIndicatorContainer = object : LinearLayout(this) {
             override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
                 val availableWidth = MeasureSpec.getSize(widthMeasureSpec)
-                val menuClearance = if (
-                    resolvedReaderLayout() == ReaderLayoutMode.TALL
-                ) dp(64) else 0
-                val usableWidth = (availableWidth - menuClearance).coerceAtLeast(0)
-                val minimumUsefulWidth = min(availableWidth, dp(140))
+                val tall = resolvedReaderLayout() == ReaderLayoutMode.TALL
+                val leadingClearance = when {
+                    textSearchSession != null && tall -> dp(136)
+                    textSearchSession != null -> dp(80)
+                    tall -> dp(64)
+                    else -> 0
+                }
+                val usableWidth = (availableWidth - leadingClearance).coerceAtLeast(0)
+                val minimumUsefulWidth = min(usableWidth, dp(140))
                 val cappedWidth = min(
                     max(usableWidth, minimumUsefulWidth),
                     dp(360),
@@ -1077,7 +1290,7 @@ class MainActivity : Activity() {
             val edges = edgeInsets(insets)
             val tall = resolvedReaderLayout() == ReaderLayoutMode.TALL
             (searchButton.layoutParams as FrameLayout.LayoutParams).also { params ->
-                params.bottomMargin = dp(68) + edges.bottom
+                params.bottomMargin = dp(8 - CHROME_VERTICAL_INSET_DP) + edges.bottom
                 params.marginEnd = dp(8) + edges.right
                 searchButton.layoutParams = params
             }
@@ -1094,11 +1307,19 @@ class MainActivity : Activity() {
                 params.marginEnd = dp(8) + edges.right
                 referenceIndicatorContainer.layoutParams = params
             }
-            val referenceIndicatorOffset = if (textSearchSession != null) dp(60) else 0
-            val referenceBottomControls = if (tall) 0 else dp(124) + edges.bottom
+            (referenceSearchEditButton.layoutParams as FrameLayout.LayoutParams).also { params ->
+                params.topMargin = dp(8) + edges.top
+                params.marginStart = dp(if (tall) 64 else 8) + if (tall) edges.left else 0
+                referenceSearchEditButton.layoutParams = params
+            }
+            val referenceBottomControls = if (tall) {
+                0
+            } else {
+                dp(CHROME_SURFACE_HEIGHT_DP + 16) + edges.bottom
+            }
             referenceSearchContainer.setPadding(
                 dp(12) + if (tall) edges.left else 0,
-                dp(12) + edges.top + referenceIndicatorOffset,
+                dp(REFERENCE_SEARCH_CONTENT_TOP_DP) + edges.top,
                 dp(12) + edges.right,
                 dp(10) + referenceBottomControls,
             )
@@ -1236,7 +1457,7 @@ class MainActivity : Activity() {
         val primaryTop = (if (primaryTouchesTop) edges.top else 0) +
             if (primaryTouchesTop && chromeVisible) dp(68) else dp(20)
         val primaryBottom = if (primaryContainsSearch) {
-            dp(124) + edges.bottom
+            dp(CHROME_SURFACE_HEIGHT_DP + 24) + edges.bottom
         } else {
             dp(32) + edges.bottom + if (chromeVisible) dp(60) else 0
         }
@@ -1245,7 +1466,7 @@ class MainActivity : Activity() {
         val referenceBottom = if (tall) {
             dp(20)
         } else {
-            dp(124) + edges.bottom
+            dp(CHROME_SURFACE_HEIGHT_DP + 24) + edges.bottom
         }
         primaryMarkdownSurface.setContentInsets(
             edges.left + dp(20),
@@ -1300,10 +1521,16 @@ class MainActivity : Activity() {
         }
         referenceSearchContainer.setPadding(
             dp(12),
-            dp(72),
+            dp(REFERENCE_SEARCH_CONTENT_TOP_DP),
             dp(12),
-            if (dockRight) dp(134) else dp(10),
+            if (dockRight) dp(CHROME_SURFACE_HEIGHT_DP + 26) else dp(10),
         )
+        if (::referenceSearchEditButton.isInitialized) {
+            (referenceSearchEditButton.layoutParams as FrameLayout.LayoutParams).also { params ->
+                params.marginStart = dp(if (dockRight) 8 else 64)
+                referenceSearchEditButton.layoutParams = params
+            }
+        }
         readerContainer.requestLayout()
         if (::root.isInitialized) root.requestApplyInsets()
     }
@@ -1359,6 +1586,7 @@ class MainActivity : Activity() {
     }
 
     private fun chooseLibraryDocument() {
+        if (!requireCatalogReady()) return
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
@@ -1372,6 +1600,7 @@ class MainActivity : Activity() {
     }
 
     private fun chooseLibraryFolder() {
+        if (!requireCatalogReady()) return
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             addFlags(
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -1422,24 +1651,29 @@ class MainActivity : Activity() {
     }
 
     private fun addLibraryFolder(uri: Uri, resultFlags: Int) {
+        if (!requireCatalogReady()) return
         try {
             persistReadPermission(uri, resultFlags)
         } catch (t: Throwable) {
             showError("Could not keep access to folder", t)
             return
         }
-        val folder = LibraryFolderRecord(
-            uri = uri.toString(),
-            label = documentMetadataReader.displayName(uri) ?: "Library folder",
-        )
-        val existingIndex = libraryFolders.indexOfFirst { it.uri == folder.uri }
-        if (existingIndex >= 0) {
-            libraryFolders[existingIndex] = folder
-        } else {
-            libraryFolders += folder
+        setStatus("Reading folder information…")
+        submitMaintenanceWork {
+            val label = documentMetadataReader.displayName(uri) ?: "Library folder"
+            mainHandler.post {
+                if (isDestroyed || destroying || !catalogReady()) return@post
+                val folder = LibraryFolderRecord(uri = uri.toString(), label = label)
+                val existingIndex = libraryFolders.indexOfFirst { it.uri == folder.uri }
+                if (existingIndex >= 0) {
+                    libraryFolders[existingIndex] = folder
+                } else {
+                    libraryFolders += folder
+                }
+                persistBooks()
+                scanLibraryFolders(listOf(folder))
+            }
         }
-        persistBooks()
-        scanLibraryFolders(listOf(folder))
     }
 
     private fun rescanLibraryFolders() {
@@ -1459,22 +1693,46 @@ class MainActivity : Activity() {
         refreshLibraryUi()
         setStatus("Scanning ${folders.size} library folder${if (folders.size == 1) "" else "s"}…")
         val knownBooks = books.toList()
+        val contentSnapshots = knownBooks.associate { book ->
+            book.id to tableSessionController.captureContentOperation(book.id)
+        }
+        val requestedAt = SystemClock.elapsedRealtime()
 
-        submitPrefetchWork {
-            try {
-                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
-                val result = scanFolderDocuments(folders, knownBooks)
-                mainHandler.post {
-                    if (isDestroyed) return@post
-                    folderScanInProgress = false
-                    applyFolderScanResult(result)
+        libraryStorage.loadIndexes(knownBooks) { indexResults ->
+            if (destroying || isDestroyed) return@loadIndexes
+            val hydratedBooks = indexResults.map { result ->
+                when (result) {
+                    is BookIndexLoadResult.Loaded -> result.book
+                    is BookIndexLoadResult.Missing -> result.book
+                    is BookIndexLoadResult.Failed -> result.book
                 }
-            } catch (t: Throwable) {
-                mainHandler.post {
-                    if (isDestroyed) return@post
-                    folderScanInProgress = false
-                    refreshLibraryUi()
-                    showError("Folder scan failed", t)
+            }
+            val queuedAt = SystemClock.elapsedRealtime()
+            submitMaintenanceWork {
+                val startedAt = SystemClock.elapsedRealtime()
+                try {
+                    val result = scanFolderDocuments(folders, hydratedBooks, contentSnapshots)
+                    val finishedAt = SystemClock.elapsedRealtime()
+                    mainHandler.post {
+                        if (isDestroyed || destroying) return@post
+                        folderScanInProgress = false
+                        lastFolderScanDiagnostic =
+                            "${folders.size} folder(s) · indexes ${queuedAt - requestedAt} ms · " +
+                            "queue ${startedAt - queuedAt} ms · scan ${finishedAt - startedAt} ms"
+                        applyFolderScanResult(result)
+                    }
+                } catch (t: Throwable) {
+                    val failedAt = SystemClock.elapsedRealtime()
+                    mainHandler.post {
+                        if (isDestroyed || destroying) return@post
+                        folderScanInProgress = false
+                        lastFolderScanDiagnostic =
+                            "Failed · indexes ${queuedAt - requestedAt} ms · " +
+                            "queue ${startedAt - queuedAt} ms · " +
+                            "work ${failedAt - startedAt} ms · ${t.message ?: t.javaClass.simpleName}"
+                        refreshLibraryUi()
+                        showError("Folder scan failed", t)
+                    }
                 }
             }
         }
@@ -1483,6 +1741,7 @@ class MainActivity : Activity() {
     private fun scanFolderDocuments(
         folders: List<LibraryFolderRecord>,
         knownBooks: List<BookRecord>,
+        contentSnapshots: Map<String, BookOperationToken>,
     ): FolderScanResult {
         val failures = mutableListOf<String>()
         val skipped = mutableListOf<String>()
@@ -1652,6 +1911,7 @@ class MainActivity : Activity() {
             unchangedCount = unchanged,
             skipped = skipped,
             failures = failures,
+            contentSnapshots = contentSnapshots,
         )
     }
 
@@ -1660,10 +1920,19 @@ class MainActivity : Activity() {
         markdownDocument: FolderDocument,
         newBookColor: () -> Int,
     ): FolderBookChange? {
-        val hydrated = existing?.let(bookRepository::hydrate)
+        val hydrated = existing
         val bookId = existing?.id ?: UUID.randomUUID().toString()
-        val opened = MarkdownDocument(contentResolver, markdownDocument.uri, markdownEngine)
-        val headings = outlineEntries(opened, bookId, BookmarkSource.MARKDOWN_HEADING)
+        val (pageCount, fingerprint, headings) = MarkdownDocument(
+            contentResolver,
+            markdownDocument.uri,
+            maintenanceMarkdownEngine,
+        ).use { opened ->
+            Triple(
+                opened.pageCount,
+                opened.content.fingerprint,
+                outlineEntries(opened, bookId, BookmarkSource.MARKDOWN_HEADING),
+            )
+        }
         val updated = BookRecord(
             id = bookId,
             title = cleanBookName(markdownDocument.fileName),
@@ -1671,17 +1940,17 @@ class MainActivity : Activity() {
             uri = markdownDocument.uri.toString(),
             kind = LibraryItemKind.MARKDOWN,
             color = hydrated?.color ?: newBookColor(),
-            pageCount = opened.pageCount,
+            pageCount = pageCount,
             pdfBookmarks = headings,
             storedBookmarkCount = headings.distinctBy { it.identityKey }.size,
             indexVersion = CURRENT_BOOK_INDEX_VERSION,
             indexLoaded = true,
             sourceSize = markdownDocument.size,
             sourceLastModified = markdownDocument.lastModified,
-            sourceFingerprint = opened.content.fingerprint,
+            sourceFingerprint = fingerprint,
             sourceRevisionToken = if (
                 hydrated == null || hydrated.uri != markdownDocument.uri.toString() ||
-                hydrated.sourceFingerprint != opened.content.fingerprint
+                hydrated.sourceFingerprint != fingerprint
             ) {
                 UUID.randomUUID().toString()
             } else {
@@ -1690,6 +1959,7 @@ class MainActivity : Activity() {
             tagIds = hydrated?.tagIds.orEmpty(),
         )
         val contentChanged = hydrated == null ||
+            !hydrated.indexLoaded ||
             hydrated.uri != updated.uri ||
             hydrated.sourceFingerprint != updated.sourceFingerprint ||
             hydrated.indexVersion < CURRENT_BOOK_INDEX_VERSION
@@ -1699,16 +1969,12 @@ class MainActivity : Activity() {
                 hydrated.sourceLastModified != updated.sourceLastModified
             )
         if (!contentChanged && !metadataChanged) return null
-        if (contentChanged) bookRepository.saveIndex(updated)
         return FolderBookChange(
             book = updated,
             isNew = existing == null,
             contentChanged = contentChanged,
-            textIndexChanged = hydrated != null && (
-                hydrated.uri != updated.uri ||
-                    hydrated.sourceFingerprint != updated.sourceFingerprint ||
-                    hydrated.pageCount != updated.pageCount
-                ),
+            textIndexChanged = hydrated != null &&
+                hydrated.sourceRevisionKey() != updated.sourceRevisionKey(),
             tocImported = false,
             rejectedTocLines = 0,
         )
@@ -1721,7 +1987,7 @@ class MainActivity : Activity() {
         newBookColor: () -> Int,
         failures: MutableList<String>,
     ): FolderBookChange? {
-        val existingHydrated = existing?.let(bookRepository::hydrate)
+        val existingHydrated = existing
         val pdfMetadata = DocumentMetadata(
             fileName = pdfDocument.fileName,
             size = pdfDocument.size,
@@ -1836,7 +2102,6 @@ class MainActivity : Activity() {
             )
         if (existing != null && !contentChanged && !tocImported && !metadataChanged) return null
 
-        if (existing == null || contentChanged || tocImported) bookRepository.saveIndex(updated)
         return FolderBookChange(
             book = updated,
             isNew = existing == null,
@@ -1867,7 +2132,7 @@ class MainActivity : Activity() {
                     lastModified = document.lastModified,
                 )
             }
-        val hydrated = existing?.let(bookRepository::hydrate)
+        val hydrated = existing
         val bookId = existing?.id ?: UUID.randomUUID().toString()
         val bookmarks = imageBookmarks(bookId, images)
         val albumPath = first.relativeDirectory.ifBlank { first.parentName }
@@ -1900,7 +2165,6 @@ class MainActivity : Activity() {
             hydrated.title != updated.title || hydrated.fileName != updated.fileName ||
             hydrated.imageFiles != updated.imageFiles || hydrated.indexVersion < CURRENT_BOOK_INDEX_VERSION
         if (!changed) return null
-        bookRepository.saveIndex(updated)
         return FolderBookChange(
             book = updated,
             isNew = existing == null,
@@ -2056,30 +2320,44 @@ class MainActivity : Activity() {
         for (change in result.changes) {
             if (change.isNew) {
                 if (books.any { it.id == change.book.id || it.uri == change.book.uri }) continue
+                val token = tableSessionController.beginContentOperation(change.book.id)
                 books += change.book
-                selectedBookIds += change.book.id
+                saveAcceptedBookIndex(change.book, token)
                 addedChanges += change
                 appliedChanges += change
                 continue
             }
             val current = bookById(change.book.id) ?: continue
+            val expected = result.contentSnapshots[current.id] ?: continue
+            val token = tableSessionController.claimContentOperation(expected) ?: continue
             previousUris[current.id] = current.uri
+                    val accepted = mergeSourceBookResult(current, change.book)
             val retained = if (current.id in selectedBookIds) {
-                change.book
+                accepted
             } else {
-                change.book.copy(
+                accepted.copy(
                     pdfBookmarks = emptyList(),
                     externalBookmarks = emptyList(),
                     imageFiles = emptyList(),
-                    storedBookmarkCount = change.book.bookmarkCount,
+                    storedBookmarkCount = accepted.bookmarkCount,
                     indexLoaded = false,
                 )
             }
             if (replaceBook(retained)) {
+                if (change.contentChanged || change.tocImported) {
+                    saveAcceptedBookIndex(accepted, token)
+                }
                 unavailableBookIds.remove(current.id)
                 unavailableBookErrors.remove(current.id)
-                appliedChanges += change
+                appliedChanges += change.copy(book = accepted)
             }
+        }
+
+        if (addedChanges.isNotEmpty()) {
+            applyTableSelectionIntent(
+                selectedBookIds + addedChanges.map { it.book.id },
+                persistChanges = false,
+            )
         }
 
         if (tabs.isEmpty()) {
@@ -2140,7 +2418,10 @@ class MainActivity : Activity() {
             lastSourceRefreshDiagnostic = "Folder rescan refreshed " +
                 refreshed.joinToString { "${it.book.title} (${it.book.sourceRevisionKey().take(12)})" }
         }
-        val activeChanged = pdfBookId in changedDocumentIds
+        val activeChanged = activeTabOrNull()?.bookId in changedDocumentIds ||
+            pdfBookId in changedDocumentIds
+        val updatedBookIds = appliedChanges.mapTo(HashSet()) { it.book.id }
+        val activeRecordUpdated = activeTabOrNull()?.bookId in updatedBookIds
         val referenceChanged = referenceLocation?.bookId in changedDocumentIds
         if (prefetchBookId in changedDocumentIds) submitPrefetchWork {
             if (prefetchBookId in changedDocumentIds) {
@@ -2164,7 +2445,10 @@ class MainActivity : Activity() {
             renderTabBar()
             updatePageIndicator()
             updateEmptyState()
-            if (pdf == null && tabs.isNotEmpty()) activateCurrentTab()
+            when {
+                activeRecordUpdated -> resumeActiveDocumentAfterIndexChange(activeTab().bookId)
+                pdf == null && tabs.isNotEmpty() -> activateCurrentTab()
+            }
         }
         if (referenceChanged) renderReference()
 
@@ -2216,21 +2500,29 @@ class MainActivity : Activity() {
     }
 
     private fun addLibraryDocument(uri: Uri, resultFlags: Int) {
-        val metadata = documentMetadataReader.query(uri)
-        val fileName = metadata.fileName.orEmpty()
-        val mimeType = contentResolver.getType(uri).orEmpty()
-        when {
-            isMarkdownFile(fileName, mimeType) -> addMarkdown(uri, resultFlags, metadata)
-            fileName.endsWith(".pdf", ignoreCase = true) || mimeType.equals("application/pdf", true) ->
-                addPdf(uri, resultFlags, metadata)
-            else -> showError(
-                "Unsupported file",
-                IllegalArgumentException("Choose a PDF, .md, or .markdown file"),
-            )
+        if (!requireCatalogReady()) return
+        setStatus("Reading document information…")
+        submitMaintenanceWork {
+            val metadata = documentMetadataReader.query(uri)
+            val mimeType = contentResolver.getType(uri).orEmpty()
+            mainHandler.post {
+                if (isDestroyed || destroying || !catalogReady()) return@post
+                val fileName = metadata.fileName.orEmpty()
+                when {
+                    isMarkdownFile(fileName, mimeType) -> addMarkdown(uri, resultFlags, metadata)
+                    fileName.endsWith(".pdf", ignoreCase = true) ||
+                        mimeType.equals("application/pdf", true) ->
+                        addPdf(uri, resultFlags, metadata)
+                    else -> showError(
+                        "Unsupported file",
+                        IllegalArgumentException("Choose a PDF, .md, or .markdown file"),
+                    )
+                }
+            }
         }
     }
 
-    private fun addPdf(uri: Uri, resultFlags: Int, suppliedMetadata: DocumentMetadata? = null) {
+    private fun addPdf(uri: Uri, resultFlags: Int, metadata: DocumentMetadata) {
         val existing = books.indexOfFirst {
             it.kind == LibraryItemKind.PDF && it.uri == uri.toString()
         }
@@ -2245,7 +2537,7 @@ class MainActivity : Activity() {
             updateKnownBookSource(
                 bookId = known.id,
                 uri = uri,
-                metadata = suppliedMetadata ?: documentMetadataReader.query(uri),
+                metadata = metadata,
                 selectAndOpen = true,
                 forceTextReindex = true,
                 refreshReason = "PDF re-added",
@@ -2253,7 +2545,6 @@ class MainActivity : Activity() {
             return
         }
 
-        val metadata = suppliedMetadata ?: documentMetadataReader.query(uri)
         val fileName = metadata.fileName ?: "Selected PDF"
         val matches = books.filter {
             it.kind == LibraryItemKind.PDF && it.fileName.equals(fileName, ignoreCase = true)
@@ -2308,14 +2599,15 @@ class MainActivity : Activity() {
 
     private fun createMarkdownBook(uri: Uri, metadata: DocumentMetadata) {
         val id = UUID.randomUUID().toString()
+        val contentToken = tableSessionController.beginContentOperation(id)
         val fileName = metadata.fileName ?: "Selected note.md"
         val title = cleanBookName(fileName)
         val color = nextBookColor()
         setStatus("Adding $title…")
-        submitRenderWork {
+        submitMaintenanceWork {
             var opened: PdfDocument? = null
             try {
-                opened = MarkdownDocument(contentResolver, uri, markdownEngine)
+                opened = MarkdownDocument(contentResolver, uri, maintenanceMarkdownEngine)
                 val markdown = opened as MarkdownDocument
                 val outline = outlineEntries(markdown, id, BookmarkSource.MARKDOWN_HEADING)
                 val record = BookRecord(
@@ -2333,11 +2625,19 @@ class MainActivity : Activity() {
                     sourceFingerprint = markdown.content.fingerprint,
                     sourceRevisionToken = UUID.randomUUID().toString(),
                 )
-                bookRepository.saveIndex(record)
                 mainHandler.post {
-                    if (isDestroyed) return@post
+                    if (
+                        isDestroyed ||
+                        !tableSessionController.isContentOperationCurrent(contentToken) ||
+                        books.any { it.id == record.id || it.uri == record.uri }
+                    ) return@post
                     books += record
-                    selectedBookIds += record.id
+                    applyTableSelectionIntent(
+                        selectedBookIds + record.id,
+                        persistChanges = false,
+                        createFallbackTab = false,
+                    )
+                    saveAcceptedBookIndex(record, contentToken)
                     persistBooks()
                     rebuildBookmarkIndex()
                     refreshLibraryUi()
@@ -2363,12 +2663,13 @@ class MainActivity : Activity() {
 
     private fun createLibraryBook(uri: Uri, metadata: DocumentMetadata) {
         val id = UUID.randomUUID().toString()
+        val contentToken = tableSessionController.beginContentOperation(id)
         val fileName = metadata.fileName ?: "Selected PDF"
         val title = cleanBookName(fileName)
         val color = nextBookColor()
         setStatus("Adding $title…")
 
-        submitRenderWork {
+        submitMaintenanceWork {
             var opened: PdfDocument? = null
             try {
                 opened = openDocument(uri)
@@ -2386,11 +2687,19 @@ class MainActivity : Activity() {
                     sourceLastModified = metadata.lastModified,
                     sourceRevisionToken = UUID.randomUUID().toString(),
                 )
-                bookRepository.saveIndex(record)
                 mainHandler.post {
-                    if (isDestroyed) return@post
+                    if (
+                        isDestroyed ||
+                        !tableSessionController.isContentOperationCurrent(contentToken) ||
+                        books.any { it.id == record.id || it.uri == record.uri }
+                    ) return@post
                     books += record
-                    selectedBookIds += record.id
+                    applyTableSelectionIntent(
+                        selectedBookIds + record.id,
+                        persistChanges = false,
+                        createFallbackTab = false,
+                    )
+                    saveAcceptedBookIndex(record, contentToken)
                     persistBooks()
                     rebuildBookmarkIndex()
                     refreshLibraryUi()
@@ -2414,37 +2723,51 @@ class MainActivity : Activity() {
 
     private fun relinkSource(uri: Uri, resultFlags: Int) {
         val bookId = pendingRelinkBookId.also { pendingRelinkBookId = null } ?: return
-        val old = bookById(bookId) ?: return
+        if (bookById(bookId) == null) return
         if (books.any { it.id != bookId && it.uri == uri.toString() }) {
             showError("Relink failed", IllegalArgumentException("That source is already used by another library item"))
             return
         }
-        val metadata = documentMetadataReader.query(uri)
-        val mimeType = contentResolver.getType(uri)
-        if (
-            old.kind == LibraryItemKind.MARKDOWN &&
-            !isMarkdownFile(metadata.fileName.orEmpty(), mimeType)
-        ) {
-            showError("Relink failed", IllegalArgumentException("Choose a .md or .markdown file"))
-            return
-        }
-        try {
-            persistReadPermission(uri, resultFlags)
-        } catch (t: Throwable) {
-            showError("Could not keep access to source", t)
-            return
-        }
-        if (old.kind == LibraryItemKind.PDF) {
-            updateKnownBookSource(
-                bookId = bookId,
-                uri = uri,
-                metadata = metadata,
-                selectAndOpen = bookId in selectedBookIds,
-                forceTextReindex = true,
-                refreshReason = "PDF relinked or replaced",
-            )
-        } else {
-            updateKnownMarkdownSource(old, uri, metadata)
+        setStatus("Reading replacement source…")
+        submitMaintenanceWork {
+            val metadata = documentMetadataReader.query(uri)
+            val mimeType = contentResolver.getType(uri)
+            mainHandler.post finish@{
+                if (isDestroyed || destroying) return@finish
+                val old = bookById(bookId) ?: return@finish
+                if (books.any { it.id != bookId && it.uri == uri.toString() }) {
+                    showError(
+                        "Relink failed",
+                        IllegalArgumentException("That source is already used by another library item"),
+                    )
+                    return@finish
+                }
+                if (
+                    old.kind == LibraryItemKind.MARKDOWN &&
+                    !isMarkdownFile(metadata.fileName.orEmpty(), mimeType)
+                ) {
+                    showError("Relink failed", IllegalArgumentException("Choose a .md or .markdown file"))
+                    return@finish
+                }
+                try {
+                    persistReadPermission(uri, resultFlags)
+                } catch (t: Throwable) {
+                    showError("Could not keep access to source", t)
+                    return@finish
+                }
+                if (old.kind == LibraryItemKind.PDF) {
+                    updateKnownBookSource(
+                        bookId = bookId,
+                        uri = uri,
+                        metadata = metadata,
+                        selectAndOpen = bookId in selectedBookIds,
+                        forceTextReindex = true,
+                        refreshReason = "PDF relinked or replaced",
+                    )
+                } else {
+                    updateKnownMarkdownSource(old, uri, metadata)
+                }
+            }
         }
     }
 
@@ -2454,12 +2777,14 @@ class MainActivity : Activity() {
         metadata: DocumentMetadata,
     ) {
         require(old.kind == LibraryItemKind.MARKDOWN)
-        setStatus("Relinking ${old.title}…")
-        submitPrefetchWork {
+        val snapshot = bookById(old.id) ?: return
+        val contentToken = tableSessionController.beginContentOperation(old.id)
+        setStatus("Relinking ${snapshot.title}…")
+        loadIndexForContentOperation(snapshot, contentToken) { hydrated ->
+            submitMaintenanceWork {
             var document: PdfDocument? = null
             try {
-                val hydrated = if (old.indexLoaded) old else bookRepository.hydrate(old)
-                val opened = MarkdownDocument(contentResolver, uri, markdownEngine)
+                val opened = MarkdownDocument(contentResolver, uri, maintenanceMarkdownEngine)
                 document = opened
                 val headings = outlineEntries(opened, old.id, BookmarkSource.MARKDOWN_HEADING)
                 val updated = hydrated.copy(
@@ -2476,71 +2801,79 @@ class MainActivity : Activity() {
                     sourceFingerprint = opened.content.fingerprint,
                     sourceRevisionToken = UUID.randomUUID().toString(),
                 )
-                bookRepository.saveIndex(updated)
                 mainHandler.post {
-                    if (isDestroyed || bookById(old.id) == null) return@post
-                    val retained = if (old.id in selectedBookIds) {
-                        updated
+                    if (
+                        isDestroyed ||
+                        !tableSessionController.isContentOperationCurrent(contentToken)
+                    ) return@post
+                    val current = bookById(snapshot.id) ?: return@post
+                    val accepted = mergeSourceBookResult(current, updated)
+                    val retained = if (snapshot.id in selectedBookIds) {
+                        accepted
                     } else {
-                        updated.copy(
+                        accepted.copy(
                             pdfBookmarks = emptyList(),
                             externalBookmarks = emptyList(),
                             imageFiles = emptyList(),
-                            storedBookmarkCount = updated.bookmarkCount,
+                            storedBookmarkCount = accepted.bookmarkCount,
                             indexLoaded = false,
                         )
                     }
                     if (!replaceBook(retained)) return@post
+                    saveAcceptedBookIndex(accepted, contentToken)
                     lastSourceRefreshDiagnostic = sourceRefreshDiagnostic(
-                        book = old,
+                        book = current,
                         metadata = metadata,
                         reason = "Note relinked or replaced",
-                        nextRevision = updated.sourceRevisionKey(),
+                        nextRevision = accepted.sourceRevisionKey(),
                     )
-                    unavailableBookIds.remove(old.id)
-                    unavailableBookErrors.remove(old.id)
-                    if (old.uri != updated.uri) releaseExactPersistedPermission(old.uri)
+                    unavailableBookIds.remove(snapshot.id)
+                    unavailableBookErrors.remove(snapshot.id)
+                    if (current.uri != accepted.uri) releaseExactPersistedPermission(current.uri)
 
                     val destinations = headings.associateBy { it.identityKey }
-                    tabs.filter { it.bookId == old.id }.forEach { tab ->
+                    tabs.filter { it.bookId == snapshot.id }.forEach { tab ->
                         val destination = tab.anchorKey?.let(destinations::get)
                         tab.pageIndex = destination?.pageIndex
-                            ?: tab.pageIndex.coerceIn(0, updated.pageCount - 1)
+                            ?: tab.pageIndex.coerceIn(0, accepted.pageCount - 1)
                         tab.originPageIndex = destination?.pageIndex
-                            ?: tab.originPageIndex.coerceIn(0, updated.pageCount - 1)
+                            ?: tab.originPageIndex.coerceIn(0, accepted.pageCount - 1)
                         if (destination != null) tab.label = destination.title
                     }
-                    referenceLocation?.takeIf { it.bookId == old.id }?.let { reference ->
+                    referenceLocation?.takeIf { it.bookId == snapshot.id }?.let { reference ->
                         val destination = reference.anchorKey?.let(destinations::get)
                         reference.pageIndex = destination?.pageIndex
-                            ?: reference.pageIndex.coerceIn(0, updated.pageCount - 1)
+                            ?: reference.pageIndex.coerceIn(0, accepted.pageCount - 1)
                         reference.originPageIndex = destination?.pageIndex
-                            ?: reference.originPageIndex.coerceIn(0, updated.pageCount - 1)
+                            ?: reference.originPageIndex.coerceIn(0, accepted.pageCount - 1)
                     }
 
                     persistBooks()
                     persistSession()
                     rebuildBookmarkIndex()
-                    if (old.id in selectedBookIds) {
-                        scheduleBookTextIndex(updated, force = true)
+                    if (snapshot.id in selectedBookIds) {
+                        scheduleBookTextIndex(accepted, force = true)
                     } else {
-                        deleteBookTextIndex(old.id)
+                        deleteBookTextIndex(snapshot.id)
                     }
                     refreshTextSearchScope()
                     refreshLibraryUi()
-                    discardSecondaryDocument(old.id)
-                    if (activeTabOrNull()?.bookId == old.id) {
+                    discardSecondaryDocument(snapshot.id)
+                    if (activeTabOrNull()?.bookId == snapshot.id) {
                         activateCurrentTab(forceReload = true)
-                    } else if (referenceLocation?.bookId == old.id) {
+                    } else if (referenceLocation?.bookId == snapshot.id) {
                         renderReference()
                     }
-                    Toast.makeText(this, "${updated.title} relinked", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "${accepted.title} relinked", Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
-                if (uri.toString() != old.uri) releaseExactPersistedPermission(uri.toString())
-                showError("Note relink failed", t)
+                if (tableSessionController.isContentOperationCurrent(contentToken)) {
+                    if (uri.toString() != snapshot.uri) releaseExactPersistedPermission(uri.toString())
+                    showError("Note relink failed", t)
+                }
             } finally {
                 document?.close()
+            }
             }
         }
     }
@@ -2548,80 +2881,82 @@ class MainActivity : Activity() {
     private fun updateKnownBookSource(
         bookId: String,
         uri: Uri,
-        metadata: DocumentMetadata,
+        metadata: DocumentMetadata?,
         selectAndOpen: Boolean,
         forceTextReindex: Boolean = false,
         refreshReason: String = "PDF source updated",
     ) {
-        val old = bookById(bookId) ?: return
-        require(old.kind == LibraryItemKind.PDF) { "Only PDFs can be relinked" }
-        val wasPrimary = pdfBookId == bookId
-        setStatus("Updating ${old.title}…")
-        val work = {
+        var snapshot = bookById(bookId) ?: return
+        require(snapshot.kind == LibraryItemKind.PDF) { "Only PDFs can be relinked" }
+        if (selectAndOpen && bookId !in selectedBookIds) {
+            applyTableSelectionIntent(selectedBookIds + bookId)
+            snapshot = bookById(bookId) ?: return
+        }
+        val contentToken = tableSessionController.beginContentOperation(bookId)
+        setStatus("Updating ${snapshot.title}…")
+        loadIndexForContentOperation(snapshot, contentToken) { hydratedOld ->
+            submitMaintenanceWork work@{
             var opened: PdfDocument? = null
             try {
-                val hydratedOld = if (old.indexLoaded) old else bookRepository.hydrate(old)
-                if (wasPrimary && pdfBookId == bookId) {
-                    pdf?.close()
-                    pdf = null
-                    pdfBookId = null
-                } else if (!wasPrimary) {
-                    prefetchPdf?.close()
-                    prefetchPdf = null
-                    prefetchBookId = null
-                }
+                if (!tableSessionController.isContentOperationCurrent(contentToken)) return@work
+                val inspectedMetadata = metadata ?: documentMetadataReader.query(uri)
                 opened = openDocument(uri)
                 val updated = hydratedOld.copy(
-                    title = metadata.fileName?.let(::cleanBookName) ?: old.title,
-                    fileName = metadata.fileName ?: old.fileName,
+                    title = inspectedMetadata.fileName?.let(::cleanBookName) ?: snapshot.title,
+                    fileName = inspectedMetadata.fileName ?: snapshot.fileName,
                     uri = uri.toString(),
                     pageCount = opened.pageCount,
                     pdfBookmarks = outlineEntries(opened, bookId),
                     externalBookmarks = hydratedOld.externalBookmarks.filter { it.pageIndex < opened.pageCount },
                     indexVersion = CURRENT_BOOK_INDEX_VERSION,
                     indexLoaded = true,
-                    sourceSize = metadata.size,
-                    sourceLastModified = metadata.lastModified,
+                    sourceSize = inspectedMetadata.size,
+                    sourceLastModified = inspectedMetadata.lastModified,
                     sourceRevisionToken = UUID.randomUUID().toString(),
                 )
-                bookRepository.saveIndex(updated)
                 mainHandler.post {
-                    if (selectAndOpen) selectedBookIds += bookId
+                    if (
+                        isDestroyed ||
+                        !tableSessionController.isContentOperationCurrent(contentToken)
+                    ) return@post
+                    val current = bookById(bookId) ?: return@post
+                    val accepted = mergeSourceBookResult(current, updated)
                     val retained = if (bookId in selectedBookIds) {
-                        updated
+                        accepted
                     } else {
-                        updated.copy(
+                        accepted.copy(
                             pdfBookmarks = emptyList(),
                             externalBookmarks = emptyList(),
                             imageFiles = emptyList(),
-                            storedBookmarkCount = updated.bookmarkCount,
+                            storedBookmarkCount = accepted.bookmarkCount,
                             indexLoaded = false,
                         )
                     }
-                    if (isDestroyed || replaceBook(retained).not()) return@post
+                    if (replaceBook(retained).not()) return@post
+                    saveAcceptedBookIndex(accepted, contentToken)
                     lastSourceRefreshDiagnostic = sourceRefreshDiagnostic(
-                        book = old,
-                        metadata = metadata,
+                        book = current,
+                        metadata = inspectedMetadata,
                         reason = refreshReason,
-                        nextRevision = updated.sourceRevisionKey(),
+                        nextRevision = accepted.sourceRevisionKey(),
                     )
                     unavailableBookIds.remove(bookId)
                     unavailableBookErrors.remove(bookId)
                     persistBooks()
-                    if (old.uri != updated.uri) runCatching {
+                    if (current.uri != accepted.uri) runCatching {
                         contentResolver.releasePersistableUriPermission(
-                            Uri.parse(old.uri),
+                            Uri.parse(current.uri),
                             Intent.FLAG_GRANT_READ_URI_PERMISSION,
                         )
                     }
                     rebuildBookmarkIndex()
                     refreshLibraryUi()
                     val textIndexChanged = forceTextReindex ||
-                        old.uri != updated.uri || old.pageCount != updated.pageCount ||
-                        old.sourceRevisionKey() != updated.sourceRevisionKey()
+                        current.uri != accepted.uri || current.pageCount != accepted.pageCount ||
+                        current.sourceRevisionKey() != accepted.sourceRevisionKey()
                     if (bookId in selectedBookIds) {
                         scheduleBookTextIndex(
-                            updated,
+                            accepted,
                             force = textIndexChanged,
                         )
                     } else if (textIndexChanged) {
@@ -2629,14 +2964,14 @@ class MainActivity : Activity() {
                     }
                     refreshTextSearchScope()
                     tabs.filter { it.bookId == bookId }.forEach {
-                        it.pageIndex = it.pageIndex.coerceIn(0, updated.pageCount - 1)
-                        it.originPageIndex = it.originPageIndex.coerceIn(0, updated.pageCount - 1)
+                        it.pageIndex = it.pageIndex.coerceIn(0, accepted.pageCount - 1)
+                        it.originPageIndex = it.originPageIndex.coerceIn(0, accepted.pageCount - 1)
                     }
                     referenceLocation?.takeIf { it.bookId == bookId }?.let {
-                        it.pageIndex = it.pageIndex.coerceIn(0, updated.pageCount - 1)
-                        it.originPageIndex = it.originPageIndex.coerceIn(0, updated.pageCount - 1)
+                        it.pageIndex = it.pageIndex.coerceIn(0, accepted.pageCount - 1)
+                        it.originPageIndex = it.originPageIndex.coerceIn(0, accepted.pageCount - 1)
                     }
-                    val reloadPrimary = wasPrimary
+                    val reloadPrimary = pdfBookId == bookId || activeTabOrNull()?.bookId == bookId
                     val reloadReference = referenceLocation?.bookId == bookId
                     if (reloadPrimary) {
                         invalidateRendering(clearCache = true)
@@ -2667,16 +3002,18 @@ class MainActivity : Activity() {
                     }
                     if (reloadReference) renderReference()
                     persistSession()
-                    Toast.makeText(this, "${updated.title} updated", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "${accepted.title} updated", Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
-                if (uri.toString() != old.uri) runCatching {
-                    contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                showError("PDF update failed", t)
-                if (wasPrimary) mainHandler.post {
-                    if (!isDestroyed && activeTabOrNull()?.bookId == bookId) {
-                        activateCurrentTab(forceReload = true)
+                if (tableSessionController.isContentOperationCurrent(contentToken)) {
+                    if (uri.toString() != snapshot.uri) runCatching {
+                        contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    showError("PDF update failed", t)
+                    mainHandler.post {
+                        if (!isDestroyed && activeTabOrNull()?.bookId == bookId) {
+                            activateCurrentTab(forceReload = true)
+                        }
                     }
                 }
             } finally {
@@ -2684,21 +3021,21 @@ class MainActivity : Activity() {
             }
             Unit
         }
-        if (wasPrimary) submitRenderWork(work) else submitPrefetchWork(work)
+        }
     }
 
     private fun importExternalToc(uri: Uri, resultFlags: Int) {
         val bookId = pendingTocBookId.also { pendingTocBookId = null } ?: return
         val book = bookById(bookId) ?: return
+        val contentToken = tableSessionController.beginContentOperation(bookId)
         val sourceAccessPersisted = runCatching { persistReadPermission(uri, resultFlags) }.isSuccess
-        val metadata = documentMetadataReader.query(uri)
-        val name = metadata.fileName ?: "bookmark file"
-        setStatus("Importing $name…")
+        setStatus("Importing bookmarks…")
 
-        submitRenderWork {
+        loadIndexForContentOperation(book, contentToken, requireLoadedIndex = true) { hydrated ->
+            submitMaintenanceWork {
             try {
-                val hydrated = bookRepository.hydrate(book)
-                require(hydrated.indexLoaded) { "Could not load the existing bookmark index" }
+                val metadata = documentMetadataReader.query(uri)
+                val name = metadata.fileName ?: "bookmark file"
                 val text = contentResolver.openInputStream(uri).use { input ->
                     requireNotNull(input) { "Could not open bookmark file" }
                     input.bufferedReader(Charsets.UTF_8).use { it.readText() }
@@ -2713,29 +3050,34 @@ class MainActivity : Activity() {
                     externalTocFingerprint = textFingerprint(text),
                     indexLoaded = true,
                 )
-                bookRepository.saveIndex(
-                    imported,
-                )
-
                 mainHandler.post {
-                    if (isDestroyed) return@post
+                    if (
+                        isDestroyed ||
+                        !tableSessionController.isContentOperationCurrent(contentToken)
+                    ) return@post
                     val current = bookById(bookId) ?: return@post
-                    replaceBook(if (bookId in selectedBookIds) imported else imported.copy(
+                    val accepted = mergeSourceBookResult(current, imported)
+                    replaceBook(if (bookId in selectedBookIds) accepted else accepted.copy(
                         pdfBookmarks = emptyList(),
                         externalBookmarks = emptyList(),
                         imageFiles = emptyList(),
-                        storedBookmarkCount = imported.bookmarkCount,
+                        storedBookmarkCount = accepted.bookmarkCount,
                         indexLoaded = false,
                     ))
+                    saveAcceptedBookIndex(accepted, contentToken)
                     persistBooks()
                     rebuildBookmarkIndex()
                     renderTabBar()
+                    resumeActiveDocumentAfterIndexChange(bookId)
                     val rejected = if (parsed.rejectedLines > 0) " · ${parsed.rejectedLines} rejected" else ""
                     Toast.makeText(this, "Imported ${parsed.entries.size} bookmarks$rejected", Toast.LENGTH_LONG).show()
                     setStatus("Bookmark index: ${bookmarkIndex.size} entries")
                 }
             } catch (t: Throwable) {
-                showError("TOC import failed", t)
+                if (tableSessionController.isContentOperationCurrent(contentToken)) {
+                    showError("TOC import failed", t)
+                }
+            }
             }
         }
     }
@@ -2784,9 +3126,15 @@ class MainActivity : Activity() {
             updateEmptyState()
             return
         }
+        selectSearchHighlightForTab(tab)
         val book = bookById(tab.bookId) ?: return
         val hadPendingOpen = primaryOpenTargetBookId != null
         val request = ++primaryOpenGeneration
+        val contentToken = if (forceMetadataRefresh) {
+            tableSessionController.beginContentOperation(book.id)
+        } else {
+            tableSessionController.captureContentOperation(book.id)
+        }
         unavailableBookIds.remove(book.id)
         unavailableBookErrors.remove(book.id)
         currentPage = tab.pageIndex.coerceIn(0, book.pageCount - 1)
@@ -2818,7 +3166,10 @@ class MainActivity : Activity() {
         updateEmptyState()
         setStatus("Opening ${book.title}…")
         submitRenderWork {
-            if (request != primaryOpenGeneration || destroying) return@submitRenderWork
+            if (
+                request != primaryOpenGeneration || destroying ||
+                !tableSessionController.isContentOperationCurrent(contentToken)
+            ) return@submitRenderWork
             var opened: PdfDocument? = null
             try {
                 pdf?.close()
@@ -2860,26 +3211,20 @@ class MainActivity : Activity() {
                 } else {
                     null
                 }
-                if (refreshedOutline != null) {
-                    bookRepository.saveIndex(
-                        book.copy(
-                            pdfBookmarks = refreshedOutline,
-                            externalBookmarks = book.externalBookmarks.filter {
-                                it.pageIndex < liveDocument.pageCount
-                            },
-                            indexVersion = CURRENT_BOOK_INDEX_VERSION,
-                            indexLoaded = true,
-                            sourceFingerprint = liveFingerprint ?: book.sourceFingerprint,
-                        ),
-                    )
-                }
-                if (request != primaryOpenGeneration || destroying) return@submitRenderWork
+                if (
+                    request != primaryOpenGeneration || destroying ||
+                    !tableSessionController.isContentOperationCurrent(contentToken)
+                ) return@submitRenderWork
                 pdf = liveDocument
                 pdfBookId = book.id
                 primaryOpenTargetBookId = null
                 opened = null
                 mainHandler.post {
-                    if (isDestroyed || request != primaryOpenGeneration || activeTabOrNull()?.bookId != book.id) return@post
+                    if (
+                        isDestroyed || request != primaryOpenGeneration ||
+                        activeTabOrNull()?.bookId != book.id ||
+                        !tableSessionController.isContentOperationCurrent(contentToken)
+                    ) return@post
                     unavailableBookIds.remove(book.id)
                     unavailableBookErrors.remove(book.id)
                     bookById(book.id)?.let { current ->
@@ -2887,7 +3232,12 @@ class MainActivity : Activity() {
                             refreshedOutline != null || sourceMetadataNeedsUpdate ||
                             forceMetadataRefresh || sourceChanged
                         ) {
-                            val updated = current.copy(
+                            val acceptedToken = if (forceMetadataRefresh) {
+                                contentToken
+                            } else {
+                                tableSessionController.claimContentOperation(contentToken) ?: return@let
+                            }
+                            val sourceResult = current.copy(
                                     fileName = metadata.fileName ?: current.fileName,
                                     title = metadata.fileName?.let(::cleanBookName) ?: current.title,
                                     pageCount = if (refreshedOutline != null) liveDocument.pageCount else current.pageCount,
@@ -2913,9 +3263,13 @@ class MainActivity : Activity() {
                                         current.sourceRevisionToken
                                     },
                             )
+                            val updated = mergeSourceBookResult(current, sourceResult)
                             val revisionChanged =
                                 current.sourceRevisionKey() != updated.sourceRevisionKey()
                             replaceBook(updated)
+                            if (refreshedOutline != null) {
+                                saveAcceptedBookIndex(updated, acceptedToken)
+                            }
                             if (refreshedOutline != null) {
                                 val destinations = refreshedOutline.associateBy { it.identityKey }
                                 tabs.filter { it.bookId == book.id }.forEach { refreshedTab ->
@@ -2988,12 +3342,12 @@ class MainActivity : Activity() {
         val expectedRevision = book.sourceRevisionKey()
         if (book.kind == LibraryItemKind.MARKDOWN) {
             val expectedFingerprint = book.sourceFingerprint
-            submitPrefetchWork {
+            submitMaintenanceWork {
                 try {
                     val liveFingerprint = MarkdownDocument(
                         contentResolver,
                         Uri.parse(book.uri),
-                        markdownEngine,
+                        maintenanceMarkdownEngine,
                     ).use { it.content.fingerprint }
                     if (liveFingerprint != expectedFingerprint) mainHandler.post {
                         val current = activeBook()
@@ -3018,11 +3372,11 @@ class MainActivity : Activity() {
             return
         }
         if (book.kind != LibraryItemKind.PDF) return
-        submitRenderWork {
-            if (destroying) return@submitRenderWork
+        submitMaintenanceWork {
+            if (destroying) return@submitMaintenanceWork
             val metadata = runCatching {
                 documentMetadataReader.query(Uri.parse(book.uri))
-            }.getOrNull() ?: return@submitRenderWork
+            }.getOrNull() ?: return@submitMaintenanceWork
             if (sourceMetadataChanged(book, metadata)) mainHandler.post {
                 if (
                     !isDestroyed && activeTabOrNull()?.bookId == book.id &&
@@ -3108,7 +3462,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateNavigationControls() {
-        val enabled = selectedBookIds.isNotEmpty()
+        val enabled = catalogReady() && selectedBookIds.isNotEmpty()
         searchButton.isEnabled = enabled
         searchButton.alpha = if (enabled) 1f else 0.35f
         searchButton.imageAlpha = if (chromeVisible) 0xff else 0xcc
@@ -3120,9 +3474,17 @@ class MainActivity : Activity() {
     private fun updateEmptyState() {
         if (!::emptyHint.isInitialized) return
         val active = activeBook()
-        val loadedActiveBook = active != null && pdf != null && pdfBookId == active.id
+        val catalogFailure = (catalogState as? BookCatalogState.Failed)?.failure
+        val catalogUnavailable = catalogState is BookCatalogState.Loading || catalogFailure != null
+        val loadedActiveBook = !catalogUnavailable && active != null && pdf != null && pdfBookId == active.id
         val sourceUnavailable = active != null && active.id in unavailableBookIds
         emptyHint.text = when {
+            catalogState is BookCatalogState.Loading -> "Loading library…"
+            catalogFailure != null -> buildString {
+                append("Library could not be loaded")
+                append("\n${catalogFailure.message}")
+                append("\nThe existing catalog was left unchanged.")
+            }
             books.isEmpty() -> "Add a PDF, Markdown note, or campaign folder from ⋮"
             selectedBookIds.isEmpty() -> "Select items from Library"
             active == null -> "Choose a library item from ⋮"
@@ -3132,8 +3494,13 @@ class MainActivity : Activity() {
             }
             else -> "Opening ${active.title}…"
         }
-        emptyHint.setTextColor(if (sourceUnavailable) uiPalette.error else uiPalette.textSecondary)
-        sourceRecoveryActions.visibility = if (sourceUnavailable) View.VISIBLE else View.GONE
+        emptyHint.setTextColor(
+            if (sourceUnavailable || catalogFailure != null) uiPalette.error else uiPalette.textSecondary,
+        )
+        sourceRecoveryActions.visibility =
+            if (!catalogUnavailable && sourceUnavailable) View.VISIBLE else View.GONE
+        catalogRecoveryActions.visibility =
+            if (catalogFailure != null) View.VISIBLE else View.GONE
         sourceRelinkButton.text = if (active?.kind == LibraryItemKind.IMAGE_COLLECTION) {
             "Rescan"
         } else {
@@ -3517,6 +3884,7 @@ class MainActivity : Activity() {
                 activeTabIndex = tabs.lastIndex
                 tabs.last()
             }
+            tab.anchorKey?.let(tabSearchHighlights::remove)
             primaryMarkdownViewports.remove(tab)
             tab.bookId = entry.bookId
             tab.pageIndex = clamped
@@ -3528,6 +3896,15 @@ class MainActivity : Activity() {
         currentPage = clamped
         persistSession()
         activateCurrentTab()
+    }
+
+    private fun addBookmarkTabInBackground(entry: BookmarkEntry) {
+        if (tabs.any { it.anchorKey == entry.identityKey }) return
+        val book = bookById(entry.bookId) ?: return
+        val clamped = entry.pageIndex.coerceIn(0, book.pageCount - 1)
+        tabs += ReaderTab(entry.bookId, clamped, entry.title, entry.identityKey)
+        persistSession()
+        renderTabBar()
     }
 
     private fun openBookmarkAlongside(entry: BookmarkEntry) {
@@ -3550,6 +3927,7 @@ class MainActivity : Activity() {
                 visibleFirstPage(currentPage, activeBook()?.pageCount ?: 1),
                 activeBook()?.pageCount ?: 1,
             ) != null
+        textSearchQueryRunner.cancel()
         textSearchSession = null
         textSearchResultAdapter.notifyDataSetChanged()
         referenceLocation = ReferenceLocation(
@@ -3588,8 +3966,8 @@ class MainActivity : Activity() {
         stageViewportRestoresForLayout()
         ++renderGeneration
         referenceLocation = null
+        textSearchQueryRunner.cancel()
         textSearchSession = null
-        ++textSearchQueryGeneration
         ++referenceRenderGeneration
         ++prefetchGeneration
         referenceSurface.clearPages()
@@ -3620,8 +3998,8 @@ class MainActivity : Activity() {
         referenceSurface.visibility = if (reference != null && !markdownReference) View.VISIBLE else View.GONE
         referenceMarkdownSurface.visibility = if (reference != null && markdownReference) View.VISIBLE else View.GONE
         referenceSearchContainer.visibility = if (search != null) View.VISIBLE else View.GONE
+        referenceSearchEditButton.visibility = if (search != null) View.VISIBLE else View.GONE
         if (search != null) {
-            referenceSearchTitle.text = "“${search.query}”"
             populateSearchScopeRow(referenceSearchScopeRow, search.scopeBookId) { bookId ->
                 changeSearchScope(bookId)
             }
@@ -3692,6 +4070,7 @@ class MainActivity : Activity() {
         // was hidden before the search opened. Document references follow chrome.
         val show = hasReferencePane() && (chromeVisible || search != null)
         referenceIndicatorContainer.visibility = if (show) View.VISIBLE else View.INVISIBLE
+        referenceIndicatorContainer.requestLayout()
     }
 
     private fun switchToTab(index: Int) {
@@ -3700,6 +4079,7 @@ class MainActivity : Activity() {
         capturePrimaryImageViewport()
         activeTabIndex = index
         currentPage = tabs[index].pageIndex
+        selectSearchHighlightForTab(tabs[index])
         persistSession()
         activateCurrentTab()
     }
@@ -3708,6 +4088,7 @@ class MainActivity : Activity() {
         if (tabs.size <= 1 || index !in tabs.indices) return
         capturePrimaryImageViewport()
         val removed = tabs.removeAt(index)
+        removed.anchorKey?.let(tabSearchHighlights::remove)
         primaryMarkdownViewports.remove(removed)
         primaryImageViewports.remove(removed)
         activeTabIndex = when {
@@ -3724,6 +4105,7 @@ class MainActivity : Activity() {
         if (index !in tabs.indices || tabs.size <= 1) return
         capturePrimaryImageViewport()
         val kept = tabs[index]
+        tabs.filter { it !== kept }.mapNotNull { it.anchorKey }.forEach(tabSearchHighlights::remove)
         tabs.filter { it !== kept }.forEach(primaryImageViewports::remove)
         tabs.filter { it !== kept }.forEach(primaryMarkdownViewports::remove)
         tabs.clear()
@@ -3946,6 +4328,7 @@ class MainActivity : Activity() {
         session.indexedPages = 0
         session.readyBooks = 0
         session.searchInFlight = false
+        session.appliedSourceRevisions = emptyMap()
         session.preciseContexts.clear()
         textSearchResultAdapter.notifyDataSetChanged()
         if (::referenceSearchList.isInitialized) referenceSearchList.setSelection(0)
@@ -3972,7 +4355,8 @@ class MainActivity : Activity() {
     }
 
     private fun persistSession() {
-        readerSessionRepository.saveTabs(tabs, activeTabIndex)
+        // Never replace saved tabs with the temporary empty state shown during catalog recovery.
+        if (catalogReady()) readerSessionRepository.saveTabs(tabs, activeTabIndex)
         getSharedPreferences(PREFS, MODE_PRIVATE)
             .edit()
             .putBoolean(PREF_SPREAD, spreadMode)
@@ -4054,9 +4438,17 @@ class MainActivity : Activity() {
             )
         }
 
+        tabBar.addView(
+            View(this),
+            LinearLayout.LayoutParams(dp(SEARCH_TAB_TRAILING_SPACE_DP), 1),
+        )
+
         bottomTabScroll.post {
             val selected = tabBar.getChildAt(activeTabIndex)
             if (selected != null) bottomTabScroll.scrollTo(max(0, selected.left - dp(12)), 0)
+        }
+        if (::textSearchResultAdapter.isInitialized && textSearchSession != null) {
+            textSearchResultAdapter.notifyDataSetChanged()
         }
     }
 
@@ -4239,6 +4631,9 @@ class MainActivity : Activity() {
                 recordBookmarkVisit(entry)
                 dialog.dismiss()
                 openBookmark(entry, newTabRequested = true)
+            },
+            onNewTabInBackground = { entry ->
+                addBookmarkTabInBackground(entry)
             },
             onAlongside = { entry ->
                 recordBookmarkVisit(entry)
@@ -4443,6 +4838,7 @@ class MainActivity : Activity() {
         private val items: List<BookmarkEntry>,
         private val onOpen: (BookmarkEntry) -> Unit,
         private val onNewTab: (BookmarkEntry) -> Unit,
+        private val onNewTabInBackground: (BookmarkEntry) -> Unit,
         private val onAlongside: (BookmarkEntry) -> Unit,
     ) : BaseAdapter() {
         override fun getCount(): Int = items.size
@@ -4555,10 +4951,30 @@ class MainActivity : Activity() {
                     "${book.title} · ${path}p${item.pageNumber}"
                 }
             }
-            holder.plus.contentDescription = "Open ${item.title} in a new tab"
+            val tabIsOpen = tabs.any { it.anchorKey == item.identityKey }
+            holder.plus.text = if (tabIsOpen) "✓" else "+"
+            holder.plus.textSize = if (tabIsOpen) 18f else 22f
+            holder.plus.contentDescription = if (tabIsOpen) {
+                "Open ${item.title} tab"
+            } else {
+                "Open ${item.title} in a new tab. Hold to add it in the background"
+            }
             holder.alongside.contentDescription = "Open ${item.title} alongside"
             row.setOnClickListener { onOpen(item) }
-            holder.plus.setOnClickListener { onNewTab(item) }
+            holder.plus.setOnClickListener {
+                if (tabs.any { it.anchorKey == item.identityKey }) {
+                    onOpen(item)
+                } else {
+                    onNewTab(item)
+                }
+            }
+            holder.plus.setOnLongClickListener {
+                if (tabs.none { it.anchorKey == item.identityKey }) {
+                    onNewTabInBackground(item)
+                    notifyDataSetChanged()
+                }
+                true
+            }
             holder.alongside.setOnClickListener { onAlongside(item) }
             return row
         }
@@ -4588,6 +5004,7 @@ class MainActivity : Activity() {
                 activeBook()?.pageCount ?: 1,
             ) != null
 
+        textSearchQueryRunner.cancel()
         searchMode = SearchMode.TEXT
         referenceLocation = null
         ++referenceRenderGeneration
@@ -4623,7 +5040,9 @@ class MainActivity : Activity() {
         refreshTextSearchResults()
     }
 
-    private fun refreshTextSearchResults() {
+    private fun refreshTextSearchResults(
+        reason: TextSearchRefreshReason = TextSearchRefreshReason.EXPLICIT,
+    ) {
         val session = textSearchSession ?: return
         val selected = booksForTextSearchScope(session.scopeBookId)
         val nextBookIds = selected.map { it.id }
@@ -4633,6 +5052,7 @@ class MainActivity : Activity() {
             session.totalMatches = 0
             session.indexedPages = 0
             session.readyBooks = 0
+            session.appliedSourceRevisions = emptyMap()
             session.preciseContexts.clear()
             textSearchResultAdapter.notifyDataSetChanged()
             if (::referenceSearchList.isInitialized) referenceSearchList.setSelection(0)
@@ -4646,47 +5066,93 @@ class MainActivity : Activity() {
         }
         val pageCounts = selected.associate { it.id to it.pageCount }
         val sourceRevisions = selected.associate { it.id to it.sourceRevisionKey() }
-        val generation = ++textSearchQueryGeneration
+        if (
+            session.appliedSourceRevisions.isNotEmpty() &&
+            session.appliedSourceRevisions != sourceRevisions
+        ) {
+            session.results.clear()
+            session.totalMatches = 0
+            session.indexedPages = 0
+            session.readyBooks = 0
+            session.appliedSourceRevisions = emptyMap()
+            session.preciseContexts.clear()
+            textSearchResultAdapter.notifyDataSetChanged()
+            if (::referenceSearchList.isInitialized) referenceSearchList.setSelection(0)
+        }
+        val request = TextSearchRequest(
+            requestId = ++textSearchRequestSequence,
+            sessionId = session.id,
+            query = session.query,
+            bookIds = bookIds.toList(),
+            pageCounts = pageCounts.toMap(),
+            sourceRevisions = sourceRevisions.toMap(),
+            resultLimit = session.resultLimit,
+            submittedAtElapsedMs = SystemClock.elapsedRealtime(),
+        )
         session.searchInFlight = true
         updateTextSearchStatus()
+        textSearchQueryRunner.submit(
+            request,
+            progressOnly = reason == TextSearchRefreshReason.INDEX_PROGRESS,
+        )
+    }
 
-        submitTextSearchWork {
-            try {
-                val startedAt = SystemClock.elapsedRealtime()
-                val snapshot = textSearchIndex.search(
-                    session.query,
-                    bookIds,
-                    pageCounts,
-                    sourceRevisions,
-                    resultLimit = session.resultLimit,
-                )
-                val elapsedMs = SystemClock.elapsedRealtime() - startedAt
-                mainHandler.post {
-                    if (
-                        isDestroyed || generation != textSearchQueryGeneration ||
-                        textSearchSession !== session
-                    ) return@post
-                    applyTextSearchSnapshot(session, snapshot, elapsedMs)
-                }
-            } catch (t: Throwable) {
-                mainHandler.post {
-                    if (
-                        isDestroyed || generation != textSearchQueryGeneration ||
-                        textSearchSession !== session
-                    ) return@post
-                    session.searchInFlight = false
-                    session.error = t.message ?: t.javaClass.simpleName
-                    lastTextSearchDiagnostic = "Failed: ${session.error}"
-                    updateTextSearchStatus()
-                }
-            }
+    private fun handleTextSearchCompletion(completion: TextSearchCompletion) {
+        if (destroying || isDestroyed) return
+        val session = textSearchSession ?: return
+        if (session.id != completion.request.sessionId) return
+
+        if (!textSearchRequestStillMatches(completion.request, session)) {
+            session.searchInFlight = completion.rerunPending
+            if (!completion.rerunPending) refreshTextSearchResults()
+            return
         }
+
+        if (completion.cancelled) {
+            session.searchInFlight = completion.rerunPending
+            if (!completion.rerunPending) updateTextSearchStatus()
+            return
+        }
+
+        completion.failure?.let { failure ->
+            session.searchInFlight = false
+            session.error = failure.message ?: failure.javaClass.simpleName
+            lastTextSearchDiagnostic = buildString {
+                append("Failed after ${completion.queueWaitMs} ms queued")
+                append(" + ${completion.executionMs} ms query: ${session.error}")
+            }
+            updateTextSearchStatus()
+            return
+        }
+
+        applyTextSearchSnapshot(
+            session = session,
+            request = completion.request,
+            snapshot = checkNotNull(completion.snapshot),
+            queueWaitMs = completion.queueWaitMs,
+            executionMs = completion.executionMs,
+            rerunPending = completion.rerunPending,
+        )
+    }
+
+    private fun textSearchRequestStillMatches(
+        request: TextSearchRequest,
+        session: TextSearchSession,
+    ): Boolean {
+        if (request.query != session.query || request.resultLimit != session.resultLimit) return false
+        val selected = booksForTextSearchScope(session.scopeBookId)
+        return request.bookIds == selected.map { it.id } &&
+            request.pageCounts == selected.associate { it.id to it.pageCount } &&
+            request.sourceRevisions == selected.associate { it.id to it.sourceRevisionKey() }
     }
 
     private fun applyTextSearchSnapshot(
         session: TextSearchSession,
+        request: TextSearchRequest,
         snapshot: TextSearchSnapshot,
-        elapsedMs: Long,
+        queueWaitMs: Long,
+        executionMs: Long,
+        rerunPending: Boolean,
     ) {
         session.results.clear()
         session.results.addAll(snapshot.hits)
@@ -4694,13 +5160,15 @@ class MainActivity : Activity() {
         session.indexedPages = snapshot.indexedPages
         session.totalPages = snapshot.totalPages
         session.readyBooks = snapshot.readyBooks
-        session.searchInFlight = false
+        session.searchInFlight = rerunPending
+        session.appliedSourceRevisions = request.sourceRevisions
         lastTextSearchDiagnostic = buildString {
-            append("${elapsedMs} ms")
+            append("${queueWaitMs} ms queued")
+            append(" + ${executionMs} ms query")
             append(" · ${snapshot.hits.size}/${snapshot.totalMatches} shown")
             append(" · ${snapshot.indexedPages}/${snapshot.totalPages} parts")
-            append(" · ${session.bookIds.size} document")
-            if (session.bookIds.size != 1) append("s")
+            append(" · ${request.bookIds.size} document")
+            if (request.bookIds.size != 1) append("s")
         }
         textSearchResultAdapter.notifyDataSetChanged()
         updateTextSearchStatus()
@@ -4709,7 +5177,7 @@ class MainActivity : Activity() {
     private fun updateTextSearchStatus() {
         if (!::referenceSearchStatus.isInitialized) return
         val session = textSearchSession ?: return
-        val failed = session.bookIds.count(textIndexErrors::containsKey)
+        val failed = session.bookIds.count { textIndexCoordinator.failure(it) != null }
         val documentLabel = "${session.bookIds.size} document" +
             if (session.bookIds.size == 1) "" else "s"
         val matchLabel = if (session.totalMatches > session.results.size) {
@@ -4725,7 +5193,7 @@ class MainActivity : Activity() {
             session.indexedPages < session.totalPages -> buildString {
                 append("$matchLabel so far")
                 append(" · indexing ${session.indexedPages}/${session.totalPages} parts")
-                if (failed > 0) append(" · $failed book${if (failed == 1) "" else "s"} unavailable")
+                if (failed > 0) append(" · $failed text index${if (failed == 1) "" else "es"} failed")
             }
             else -> "$matchLabel · ${session.readyBooks}/${session.bookIds.size} documents indexed"
         }
@@ -4849,11 +5317,72 @@ class MainActivity : Activity() {
                     }
             }
             holder.snippet.text = styledTextSnippet(item.snippet)
-            holder.plus.contentDescription = "Open text result in a new tab"
+            val anchorKey = textSearchAnchorKey(item, book)
+            val tabIsOpen = tabs.any { it.anchorKey == anchorKey }
+            holder.plus.text = if (tabIsOpen) "✓" else "+"
+            holder.plus.textSize = if (tabIsOpen) 18f else 22f
+            holder.plus.contentDescription = if (tabIsOpen) {
+                "Open text result tab"
+            } else {
+                "Open text result in a new tab. Hold to add it in the background"
+            }
             row.setOnClickListener { openTextSearchHit(item, newTabRequested = false) }
-            holder.plus.setOnClickListener { openTextSearchHit(item, newTabRequested = true) }
+            holder.plus.setOnClickListener {
+                openTextSearchHit(item, newTabRequested = true)
+                notifyDataSetChanged()
+            }
+            holder.plus.setOnLongClickListener {
+                if (tabs.none { it.anchorKey == textSearchAnchorKey(item, bookById(item.bookId)) }) {
+                    addTextSearchTabInBackground(item)
+                    notifyDataSetChanged()
+                }
+                true
+            }
             return row
         }
+    }
+
+    private fun textSearchAnchorKey(hit: TextSearchHit, book: BookRecord?): String =
+        "${hit.bookId}|text-${if (book?.kind == LibraryItemKind.MARKDOWN) "section" else "page"}:${hit.pageIndex}"
+
+    private fun textSearchTabLabel(hit: TextSearchHit, book: BookRecord): String {
+        val pageIndex = hit.pageIndex.coerceIn(0, book.pageCount - 1)
+        val context = bookmarkIndex.contextAtOrBefore(hit.bookId, pageIndex)
+        return if (book.kind == LibraryItemKind.MARKDOWN) {
+            context?.title ?: "Start"
+        } else {
+            context?.title?.let { "$it · p${pageIndex + 1}" } ?: "Page ${pageIndex + 1}"
+        }
+    }
+
+    private fun textSearchHighlight(
+        hit: TextSearchHit,
+        session: TextSearchSession,
+        anchorKey: String,
+        pageIndex: Int,
+    ) = SearchHighlightTarget(
+        bookId = hit.bookId,
+        pageIndex = pageIndex,
+        terms = TextSearchIndexRepository.highlightTerms(session.query),
+        caseSensitive = false,
+        anchorKey = anchorKey,
+    )
+
+    private fun addTextSearchTabInBackground(hit: TextSearchHit) {
+        val session = textSearchSession ?: return
+        val book = bookById(hit.bookId) ?: return
+        val pageIndex = hit.pageIndex.coerceIn(0, book.pageCount - 1)
+        val anchorKey = textSearchAnchorKey(hit, book)
+        if (tabs.any { it.anchorKey == anchorKey }) return
+        tabSearchHighlights[anchorKey] = textSearchHighlight(hit, session, anchorKey, pageIndex)
+        tabs += ReaderTab(
+            bookId = hit.bookId,
+            pageIndex = pageIndex,
+            label = textSearchTabLabel(hit, book),
+            anchorKey = anchorKey,
+        )
+        persistSession()
+        renderTabBar()
     }
 
     private fun styledTextSnippet(marked: String): CharSequence {
@@ -4893,20 +5422,11 @@ class MainActivity : Activity() {
         val book = bookById(hit.bookId) ?: return
         capturePrimaryImageViewport()
         val pageIndex = hit.pageIndex.coerceIn(0, book.pageCount - 1)
-        val context = bookmarkIndex.contextAtOrBefore(hit.bookId, pageIndex)
-        val label = if (book.kind == LibraryItemKind.MARKDOWN) {
-            context?.title ?: "Start"
-        } else {
-            context?.title?.let { "$it · p${pageIndex + 1}" } ?: "Page ${pageIndex + 1}"
-        }
-        val anchorKey = "${hit.bookId}|text-${if (book.kind == LibraryItemKind.MARKDOWN) "section" else "page"}:$pageIndex"
-        activeSearchHighlight = SearchHighlightTarget(
-            bookId = hit.bookId,
-            pageIndex = pageIndex,
-            terms = TextSearchIndexRepository.highlightTerms(session.query),
-            caseSensitive = false,
-            anchorKey = anchorKey,
-        )
+        val label = textSearchTabLabel(hit, book)
+        val anchorKey = textSearchAnchorKey(hit, book)
+        val highlight = textSearchHighlight(hit, session, anchorKey, pageIndex)
+        tabSearchHighlights[anchorKey] = highlight
+        activeSearchHighlight = highlight
         ++searchHighlightGeneration
 
         val existing = tabs.indexOfFirst { it.anchorKey == anchorKey }
@@ -4927,8 +5447,10 @@ class MainActivity : Activity() {
             tabs += ReaderTab(hit.bookId, pageIndex, label, anchorKey)
             activeTabIndex = tabs.lastIndex
         } else {
-            primaryMarkdownViewports.remove(activeTab())
-            activeTab().apply {
+            val tab = activeTab()
+            tab.anchorKey?.takeIf { it != anchorKey }?.let(tabSearchHighlights::remove)
+            primaryMarkdownViewports.remove(tab)
+            tab.apply {
                 bookId = hit.bookId
                 this.pageIndex = pageIndex
                 this.label = label
@@ -5067,6 +5589,7 @@ class MainActivity : Activity() {
         val reference = referenceLocation ?: return
         val book = bookById(reference.bookId) ?: return
         val generation = ++referenceRenderGeneration
+        val requestedAt = SystemClock.elapsedRealtime()
         updatePageIndicator()
 
         if (book.kind == LibraryItemKind.MARKDOWN) {
@@ -5077,16 +5600,22 @@ class MainActivity : Activity() {
             updateCachePins()
             setStatus("Opening note reference…")
             submitPrefetchWork {
+                val startedAt = SystemClock.elapsedRealtime()
                 try {
                     if (generation != referenceRenderGeneration || reference !== referenceLocation || destroying) {
                         return@submitPrefetchWork
                     }
                     val document = secondaryDocument(book) as MarkdownDocument
+                    val finishedAt = SystemClock.elapsedRealtime()
                     mainHandler.post {
                         if (
                             isDestroyed || generation != referenceRenderGeneration ||
                             reference !== referenceLocation
                         ) return@post
+                        lastReferenceRenderDiagnostic =
+                            "${book.title} · note · queue ${startedAt - requestedAt} ms · " +
+                            "open ${finishedAt - startedAt} ms · total " +
+                            "${SystemClock.elapsedRealtime() - requestedAt} ms"
                         referenceMarkdownSurface.showDocument(
                             engine = markdownEngine,
                             nextDocument = document,
@@ -5128,11 +5657,16 @@ class MainActivity : Activity() {
                 referencePendingPageKeys = emptySet()
                 updateCachePins()
                 updatePageIndicator()
+                lastReferenceRenderDiagnostic =
+                    "${book.title} · page ${reference.pageIndex + 1} · cached · " +
+                    "${SystemClock.elapsedRealtime() - requestedAt} ms"
                 return@post
             }
 
             setStatus("Rendering reference page ${reference.pageIndex + 1}…")
+            val queuedAt = SystemClock.elapsedRealtime()
             submitPrefetchWork {
+                val startedAt = SystemClock.elapsedRealtime()
                 try {
                     if (
                         generation != referenceRenderGeneration ||
@@ -5160,6 +5694,7 @@ class MainActivity : Activity() {
                         return@submitPrefetchWork
                     }
                     val page = pageCache.put(key, rendered)
+                    val finishedAt = SystemClock.elapsedRealtime()
 
                     mainHandler.post {
                         if (
@@ -5169,6 +5704,11 @@ class MainActivity : Activity() {
                             document !== prefetchPdf ||
                             prefetchBookId != reference.bookId
                         ) return@post
+                        lastReferenceRenderDiagnostic =
+                            "${book.title} · page ${reference.pageIndex + 1} · " +
+                            "layout ${queuedAt - requestedAt} ms · queue ${startedAt - queuedAt} ms · " +
+                            "render ${finishedAt - startedAt} ms · total " +
+                            "${SystemClock.elapsedRealtime() - requestedAt} ms"
                         updateCachePins()
                         setReferencePage(reference.bookId, reference.pageIndex, page)
                         referenceDisplayedPageKeys = requestedKeys
@@ -5269,6 +5809,14 @@ class MainActivity : Activity() {
         if (::readerSurface.isInitialized) readerSurface.clearSearchHighlights()
     }
 
+    private fun selectSearchHighlightForTab(tab: ReaderTab) {
+        val next = tab.anchorKey?.let(tabSearchHighlights::get)
+        if (activeSearchHighlight == next) return
+        activeSearchHighlight = next
+        ++searchHighlightGeneration
+        if (next == null && ::readerSurface.isInitialized) readerSurface.clearSearchHighlights()
+    }
+
     private fun primarySurfaceWidth(): Int {
         val fullWidth = readerContainer.width.takeIf { it > 0 }
             ?: resources.displayMetrics.widthPixels
@@ -5358,18 +5906,18 @@ class MainActivity : Activity() {
                 .map { pageCacheKey(bookId, it, surfaceWidth) }
         }.distinct()
 
-        submitPrefetchWork {
-            if (generation != prefetchGeneration || destroying) return@submitPrefetchWork
+        submitSpeculativePrefetchWork {
+            if (generation != prefetchGeneration || destroying) return@submitSpeculativePrefetchWork
             val document = try {
                 secondaryDocument(book)
             } catch (_: Throwable) {
-                return@submitPrefetchWork
+                return@submitSpeculativePrefetchWork
             }
             for (key in keys) {
                 if (
                     generation != prefetchGeneration || document !== prefetchPdf ||
                     prefetchBookId != bookId || destroying
-                ) return@submitPrefetchWork
+                ) return@submitSpeculativePrefetchWork
                 if (pageCache.get(key) != null) continue
                 try {
                     val rendered = document.renderPage(key.pageIndex, key.targetWidthPx)
@@ -5378,7 +5926,7 @@ class MainActivity : Activity() {
                         prefetchBookId != bookId || destroying
                     ) {
                         rendered.bitmap.recycle()
-                        return@submitPrefetchWork
+                        return@submitSpeculativePrefetchWork
                     }
                     pageCache.put(key, rendered)
                 } catch (_: Throwable) {
@@ -5584,114 +6132,152 @@ class MainActivity : Activity() {
         return true
     }
 
-    private fun persistBooks() {
-        try {
-            bookRepository.save(books, selectedBookIds, libraryFolders, libraryTags)
-        } catch (t: Throwable) {
-            showError("Could not save the library", t)
-        }
-    }
-
-    private fun selectBook(bookId: String, openAfter: Boolean = false) {
-        val book = bookById(bookId) ?: return
-        if (bookId in selectedBookIds && book.indexLoaded) {
-            scheduleBookTextIndex(book)
-            if (openAfter) openBookInTab(bookId)
-            refreshLibraryUi()
+    private fun loadIndexForContentOperation(
+        snapshot: BookRecord,
+        token: BookOperationToken,
+        requireLoadedIndex: Boolean = false,
+        action: (BookRecord) -> Unit,
+    ) {
+        if (snapshot.indexLoaded) {
+            action(snapshot)
             return
         }
-        if (book.indexLoaded) {
-            selectedBookIds += bookId
-            persistBooks()
-            rebuildBookmarkIndex()
-            refreshLibraryUi()
-            scheduleBookTextIndex(book)
-            refreshTextSearchScope()
-            if (openAfter) openBookInTab(bookId)
-            return
-        }
-
-        setStatus("Loading ${book.title} index…")
-        submitPrefetchWork {
-            try {
-                val hydrated = bookRepository.hydrate(book)
-                mainHandler.post {
-                    if (isDestroyed || bookById(bookId) == null) return@post
-                    replaceBook(hydrated)
-                    selectedBookIds += bookId
-                    persistBooks()
-                    rebuildBookmarkIndex()
-                    refreshLibraryUi()
-                    scheduleBookTextIndex(hydrated)
-                    refreshTextSearchScope()
-                    if (openAfter) openBookInTab(bookId)
+        libraryStorage.loadIndex(snapshot) { result ->
+            if (
+                destroying || isDestroyed ||
+                !tableSessionController.isContentOperationCurrent(token) ||
+                bookById(snapshot.id) == null
+            ) return@loadIndex
+            when (result) {
+                is BookIndexLoadResult.Loaded -> {
+                    bookIndexLoadErrors.remove(snapshot.id)
+                    action(result.book)
                 }
-            } catch (t: Throwable) {
-                showError("Could not load ${book.title}", t)
+                is BookIndexLoadResult.Missing -> {
+                    val message = "Stored item index is missing"
+                    bookIndexLoadErrors[snapshot.id] = message
+                    if (requireLoadedIndex) {
+                        showError("Could not load ${snapshot.title}", IllegalStateException(message))
+                    } else {
+                        action(snapshot)
+                    }
+                }
+                is BookIndexLoadResult.Failed -> {
+                    val message = "Stored item index could not be read: ${result.message}"
+                    bookIndexLoadErrors[snapshot.id] = message
+                    if (requireLoadedIndex) {
+                        showError("Could not load ${snapshot.title}", IllegalStateException(message))
+                    } else {
+                        action(snapshot)
+                    }
+                }
             }
         }
     }
 
-    private fun deselectBook(bookId: String) {
-        val book = bookById(bookId) ?: return
-        if (bookId !in selectedBookIds) return
-        val removedPrimary = pdfBookId == bookId
-        val removedSecondary = prefetchBookId == bookId
-        val previouslyActive = activeTabOrNull()
-        if (referenceLocation?.bookId == bookId) closeReference(renderPrimary = false)
+    private fun saveAcceptedBookIndex(book: BookRecord, token: BookOperationToken) {
+        if (!tableSessionController.isContentOperationCurrent(token)) return
+        bookIndexLoadErrors.remove(book.id)
+        libraryStorage.saveIndex(book)
+    }
 
-        selectedBookIds -= bookId
-        textIndexTokens.remove(bookId)
-        tabs.filter { it.bookId == bookId }.forEach(primaryImageViewports::remove)
-        tabs.filter { it.bookId == bookId }.forEach(primaryMarkdownViewports::remove)
-        tabs.removeAll { it.bookId == bookId }
-        referenceImageViewports.keys.removeAll { it.startsWith("$bookId|") }
-        if (tabs.isEmpty()) {
-            selectedBooks().firstOrNull()?.let { tabs += ReaderTab(it.id, 0, "Start") }
-        }
-        activeTabIndex = previouslyActive
-            ?.takeIf { it.bookId != bookId }
-            ?.let(tabs::indexOf)
-            ?.takeIf { it >= 0 }
-            ?: if (tabs.isEmpty()) 0 else activeTabIndex.coerceIn(0, tabs.lastIndex)
-        currentPage = activeTabOrNull()?.pageIndex ?: 0
+    private fun deleteAcceptedBookIndex(bookId: String, token: BookOperationToken) {
+        if (!tableSessionController.isContentOperationCurrent(token)) return
+        libraryStorage.deleteIndex(bookId)
+    }
 
-        // Save the full index before releasing its in-memory representation.
-        persistBooks()
-        replaceBook(
-            book.copy(
-                pdfBookmarks = emptyList(),
-                externalBookmarks = emptyList(),
-                imageFiles = emptyList(),
-                storedBookmarkCount = book.bookmarkCount,
-                indexLoaded = false,
+    private fun persistBooks() {
+        if (!catalogReady()) return
+        libraryStorage.saveCatalog(
+            BookLibraryState(
+                books = books.toList(),
+                selectedBookIds = LinkedHashSet(selectedBookIds),
+                folders = libraryFolders.toList(),
+                tags = libraryTags.toList(),
             ),
         )
+    }
+
+    private fun applyTableSelectionIntent(
+        desiredBookIds: Collection<String>,
+        persistChanges: Boolean = true,
+        createFallbackTab: Boolean = true,
+    ): TableSelectionTransition {
+        capturePrimaryImageViewport()
+        captureReferenceImageViewport()
+        val transition = tableSessionController.transitionTo(
+            desiredBookIds = desiredBookIds,
+            availableBookIds = books.map { it.id },
+            tabs = tabs,
+            activeTabIndex = activeTabIndex,
+            referenceBookId = referenceLocation?.bookId,
+        )
+        val removedPrimary = activeTabOrNull()?.bookId in transition.removedBookIds ||
+            pdfBookId in transition.removedBookIds ||
+            primaryOpenTargetBookId in transition.removedBookIds
+
+        if (transition.closeReference) closeReference(renderPrimary = false)
+        tabs.filter { it.bookId in transition.removedBookIds }.forEach(primaryImageViewports::remove)
+        tabs.filter { it.bookId in transition.removedBookIds }.forEach(primaryMarkdownViewports::remove)
+        tabs.filter { it.bookId in transition.removedBookIds }
+            .mapNotNull { it.anchorKey }
+            .forEach(tabSearchHighlights::remove)
+        tabs.clear()
+        tabs += transition.survivingTabs
+        transition.removedBookIds.forEach { bookId ->
+            textIndexCoordinator.cancel(bookId)
+            referenceImageViewports.keys.removeAll { it.startsWith("$bookId|") }
+            pageCache.removeBook(bookId)
+            val book = bookById(bookId) ?: return@forEach
+            if (book.indexLoaded) {
+                replaceBook(
+                    book.copy(
+                        pdfBookmarks = emptyList(),
+                        externalBookmarks = emptyList(),
+                        imageFiles = emptyList(),
+                        storedBookmarkCount = book.bookmarkCount,
+                        indexLoaded = false,
+                    ),
+                )
+            }
+        }
+        if (tabs.isEmpty() && createFallbackTab) {
+            val fallback = transition.selectedBookIds
+                .asSequence()
+                .mapNotNull(::bookById)
+                .firstOrNull { it.indexLoaded }
+            if (fallback != null) tabs += ReaderTab(fallback.id, 0, "Start")
+        }
+        activeTabIndex = if (tabs.isEmpty()) 0 else transition.activeTabIndex.coerceIn(tabs.indices)
+        currentPage = activeTabOrNull()?.pageIndex ?: 0
+
+        if (removedPrimary) {
+            ++primaryOpenGeneration
+            primaryOpenTargetBookId = null
+            ++renderGeneration
+            clearPrimaryDisplayedPages()
+        }
+        if (transition.removedBookIds.isNotEmpty()) {
+            ++prefetchGeneration
+            submitPrefetchWork {
+                if (prefetchBookId in transition.removedBookIds) {
+                    prefetchPdf?.close()
+                    prefetchPdf = null
+                    prefetchBookId = null
+                }
+            }
+        }
+
+        if (persistChanges) persistBooks()
         persistSession()
         rebuildBookmarkIndex()
         refreshTextSearchScope()
-        if (removedPrimary) {
-            invalidateRendering(clearCache = true)
-        } else {
-            ++prefetchGeneration
-            pageCache.removeBook(bookId)
-            updateCachePins()
-        }
         refreshLibraryUi()
+        updateCachePins()
 
-        if (removedSecondary) submitPrefetchWork {
-            if (prefetchBookId == bookId) {
-                prefetchPdf?.close()
-                prefetchPdf = null
-                prefetchBookId = null
-            }
-        }
-        if (removedPrimary) {
-            if (tabs.isNotEmpty()) {
-                activateCurrentTab(forceReload = true)
-            } else {
-                ++primaryOpenGeneration
-                primaryOpenTargetBookId = null
+        when {
+            removedPrimary && tabs.isNotEmpty() -> activateCurrentTab(forceReload = true)
+            removedPrimary -> {
                 submitRenderWork {
                     pdf?.close()
                     pdf = null
@@ -5701,11 +6287,80 @@ class MainActivity : Activity() {
                 updatePageIndicator()
                 updateEmptyState()
             }
-        } else {
-            renderTabBar()
-            updatePageIndicator()
-            updateEmptyState()
+            pdf == null && tabs.isNotEmpty() -> activateCurrentTab()
+            else -> {
+                renderTabBar()
+                updatePageIndicator()
+                updateEmptyState()
+            }
         }
+        if (referenceLocation != null && !transition.closeReference) renderReference()
+        return transition
+    }
+
+    private fun selectBook(bookId: String, openAfter: Boolean = false) {
+        if (!requireCatalogReady()) return
+        var book = bookById(bookId) ?: return
+        if (bookId !in selectedBookIds) {
+            applyTableSelectionIntent(selectedBookIds + bookId)
+            book = bookById(bookId) ?: return
+        }
+        if (book.indexLoaded) {
+            scheduleBookTextIndex(book)
+            if (openAfter) openBookInTab(bookId)
+            refreshLibraryUi()
+            return
+        }
+
+        val selectionVersion = tableSessionController.selectionVersion(bookId)
+        val contentToken = tableSessionController.captureContentOperation(bookId)
+        val snapshot = book
+        setStatus("Loading ${book.title} index…")
+        libraryStorage.loadIndex(snapshot) { result ->
+            if (
+                destroying || isDestroyed ||
+                !tableSessionController.selectionStillCurrent(
+                    bookId,
+                    selectionVersion,
+                    selected = true,
+                ) || !tableSessionController.isContentOperationCurrent(contentToken)
+            ) return@loadIndex
+            val current = bookById(bookId) ?: return@loadIndex
+            val merged = when (result) {
+                is BookIndexLoadResult.Loaded -> {
+                    bookIndexLoadErrors.remove(bookId)
+                    mergeHydratedBookIndex(current, result.book).also(::replaceBook)
+                }
+                is BookIndexLoadResult.Missing -> {
+                    bookIndexLoadErrors[bookId] = "Stored item index is missing"
+                    current
+                }
+                is BookIndexLoadResult.Failed -> {
+                    bookIndexLoadErrors[bookId] = "Stored item index could not be read: ${result.message}"
+                    current
+                }
+            }
+            rebuildBookmarkIndex()
+            refreshLibraryUi()
+            if (merged.indexLoaded) scheduleBookTextIndex(merged)
+            refreshTextSearchScope()
+            if (openAfter) {
+                openBookInTab(bookId)
+            } else if (tabs.isEmpty() && merged.indexLoaded) {
+                tabs += ReaderTab(bookId, 0, "Start")
+                activeTabIndex = 0
+                currentPage = 0
+                persistSession()
+                activateCurrentTab()
+            }
+        }
+    }
+
+    private fun deselectBook(bookId: String) {
+        if (!requireCatalogReady()) return
+        if (bookById(bookId) == null) return
+        if (bookId !in selectedBookIds) return
+        applyTableSelectionIntent(selectedBookIds - bookId)
     }
 
     private fun refreshLibraryUi() {
@@ -5842,7 +6497,18 @@ class MainActivity : Activity() {
         activateCurrentTab()
     }
 
+    /** A content operation can supersede an in-flight open without changing the source handle. */
+    private fun resumeActiveDocumentAfterIndexChange(bookId: String) {
+        if (activeTabOrNull()?.bookId != bookId) return
+        if (pdfBookId == bookId && pdf != null) {
+            renderCurrent()
+        } else {
+            activateCurrentTab(forceReload = true)
+        }
+    }
+
     private fun showLibrary() {
+        if (!requireCatalogReady()) return
         if (libraryDialog?.isShowing == true) return
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
@@ -6029,6 +6695,14 @@ class MainActivity : Activity() {
                         setTextColor(uiPalette.error)
                         setPadding(0, dp(5), 0, 0)
                     })
+                    bookIndexLoadErrors[book.id]?.let { indexError ->
+                        addView(TextView(this@MainActivity).apply {
+                            text = indexError
+                            textSize = 12f
+                            setTextColor(uiPalette.error)
+                            setPadding(0, dp(5), 0, 0)
+                        })
+                    }
                 }
             }
         }
@@ -6131,7 +6805,8 @@ class MainActivity : Activity() {
                         chooseExternalToc(it.id)
                     }
                     "Remove TXT TOC" -> withHydratedBook(book.id) { hydrated ->
-                        val updated = hydrated.copy(
+                        val token = tableSessionController.beginContentOperation(book.id)
+                        val sourceResult = hydrated.copy(
                             externalBookmarks = emptyList(),
                             externalTocLabel = null,
                             externalTocUri = null,
@@ -6139,26 +6814,22 @@ class MainActivity : Activity() {
                             externalTocLastModified = null,
                             externalTocFingerprint = null,
                         )
-                        submitPrefetchWork {
-                            try {
-                                bookRepository.saveIndex(updated)
-                                mainHandler.post {
-                                    val retained = if (book.id in selectedBookIds) updated else updated.copy(
-                                        pdfBookmarks = emptyList(),
-                                        externalBookmarks = emptyList(),
-                                        imageFiles = emptyList(),
-                                        storedBookmarkCount = updated.bookmarkCount,
-                                        indexLoaded = false,
-                                    )
-                                    if (isDestroyed || !replaceBook(retained)) return@post
-                                    persistBooks()
-                                    rebuildBookmarkIndex()
-                                    refreshLibraryUi()
-                                    renderTabBar()
-                                }
-                            } catch (t: Throwable) {
-                                showError("Could not remove TXT TOC", t)
-                            }
+                        val current = bookById(book.id) ?: return@withHydratedBook
+                        val updated = mergeSourceBookResult(current, sourceResult)
+                        val retained = if (book.id in selectedBookIds) updated else updated.copy(
+                            pdfBookmarks = emptyList(),
+                            externalBookmarks = emptyList(),
+                            imageFiles = emptyList(),
+                            storedBookmarkCount = updated.bookmarkCount,
+                            indexLoaded = false,
+                        )
+                        if (replaceBook(retained)) {
+                            saveAcceptedBookIndex(updated, token)
+                            persistBooks()
+                            rebuildBookmarkIndex()
+                            refreshLibraryUi()
+                            renderTabBar()
+                            resumeActiveDocumentAfterIndexChange(book.id)
                         }
                     }
                     "Choose color" -> showBookColorDialog(book.id)
@@ -6419,6 +7090,7 @@ class MainActivity : Activity() {
         replace: Boolean,
         label: String,
     ) {
+        if (!requireCatalogReady()) return
         if (items.isEmpty()) {
             Toast.makeText(this, "There are no matching library items", Toast.LENGTH_SHORT).show()
             return
@@ -6430,143 +7102,102 @@ class MainActivity : Activity() {
                 desiredIds += book.id
             }
         }
-        val booksToHydrate = books.filter { it.id in desiredIds && !it.indexLoaded }
-        if (desiredIds == selectedBookIds && booksToHydrate.isEmpty()) {
+        val membershipChanged = desiredIds != selectedBookIds
+        if (membershipChanged) applyTableSelectionIntent(desiredIds)
+        val hydrationRequests = books
+            .filter { it.id in selectedBookIds && !it.indexLoaded }
+            .map { book ->
+                Triple(
+                    book,
+                    tableSessionController.selectionVersion(book.id),
+                    tableSessionController.captureContentOperation(book.id),
+                )
+            }
+        if (!membershipChanged && hydrationRequests.isEmpty()) {
             Toast.makeText(this, "$label is already on the table", Toast.LENGTH_SHORT).show()
             return
         }
+        if (hydrationRequests.isEmpty()) {
+            val action = if (replace) "Table now uses" else "Added to table:"
+            Toast.makeText(this, "$action $label", Toast.LENGTH_LONG).show()
+            return
+        }
 
-        val generation = ++bulkTableSelectionGeneration
         setStatus("Preparing $label…")
-        submitPrefetchWork {
-            val hydrated = HashMap<String, BookRecord>()
+        libraryStorage.loadIndexes(hydrationRequests.map { it.first }) { results ->
+            if (destroying || isDestroyed) return@loadIndexes
+            val byBookId = results.associateBy { it.book.id }
             val failures = mutableListOf<String>()
-            booksToHydrate.forEach { book ->
-                runCatching { bookRepository.hydrate(book) }
-                    .onSuccess { hydrated[book.id] = it }
-                    .onFailure { failures += book.fileName }
-            }
-            mainHandler.post {
-                if (isDestroyed || generation != bulkTableSelectionGeneration) return@post
-                applyBulkTableSelection(desiredIds, hydrated)
-                val action = if (replace) "Table now uses" else "Added to table:"
-                val failureSuffix = if (failures.isEmpty()) {
-                    ""
-                } else {
-                    " · ${failures.size} index load failure${if (failures.size == 1) "" else "s"}"
-                }
-                Toast.makeText(this, "$action $label$failureSuffix", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
-    private fun applyBulkTableSelection(
-        desiredIds: LinkedHashSet<String>,
-        hydratedBooks: Map<String, BookRecord>,
-    ) {
-        capturePrimaryImageViewport()
-        captureReferenceImageViewport()
-        val previousActive = activeTabOrNull()
-        val removedIds = selectedBookIds.filterTo(HashSet()) { it !in desiredIds }
-        val removedPrimary = pdfBookId in removedIds
-        val removedSecondary = prefetchBookId in removedIds
-
-        hydratedBooks.values.forEach(::replaceBook)
-        if (referenceLocation?.bookId in removedIds) closeReference(renderPrimary = false)
-        tabs.filter { it.bookId in removedIds }.forEach(primaryImageViewports::remove)
-        tabs.filter { it.bookId in removedIds }.forEach(primaryMarkdownViewports::remove)
-        tabs.removeAll { it.bookId in removedIds }
-        removedIds.forEach { bookId ->
-            referenceImageViewports.keys.removeAll { it.startsWith("$bookId|") }
-            textIndexTokens.remove(bookId)
-            pageCache.removeBook(bookId)
-            val book = bookById(bookId) ?: return@forEach
-            if (book.indexLoaded) {
-                replaceBook(
-                    book.copy(
-                        pdfBookmarks = emptyList(),
-                        externalBookmarks = emptyList(),
-                        imageFiles = emptyList(),
-                        storedBookmarkCount = book.bookmarkCount,
-                        indexLoaded = false,
-                    ),
-                )
-            }
-        }
-
-        selectedBookIds.clear()
-        selectedBookIds += desiredIds
-        if (tabs.isEmpty()) {
-            selectedBooks().firstOrNull()?.let { tabs += ReaderTab(it.id, 0, "Start") }
-        }
-        activeTabIndex = previousActive
-            ?.let { previous -> tabs.indexOfFirst { it === previous } }
-            ?.takeIf { it >= 0 }
-            ?: if (tabs.isEmpty()) 0 else activeTabIndex.coerceIn(0, tabs.lastIndex)
-        currentPage = activeTabOrNull()?.pageIndex ?: 0
-
-        persistBooks()
-        persistSession()
-        rebuildBookmarkIndex()
-        refreshTextSearchScope()
-        refreshLibraryUi()
-        updateCachePins()
-
-        if (removedSecondary) submitPrefetchWork {
-            if (prefetchBookId in removedIds) {
-                prefetchPdf?.close()
-                prefetchPdf = null
-                prefetchBookId = null
-            }
-        }
-        when {
-            removedPrimary -> {
-                invalidateRendering(clearCache = true)
-                if (tabs.isNotEmpty()) {
-                    activateCurrentTab(forceReload = true)
-                } else {
-                    ++primaryOpenGeneration
-                    primaryOpenTargetBookId = null
-                    submitRenderWork {
-                        pdf?.close()
-                        pdf = null
-                        pdfBookId = null
+            val accepted = mutableListOf<BookRecord>()
+            hydrationRequests.forEach { (snapshot, selectionVersion, contentToken) ->
+                val result = byBookId[snapshot.id] ?: return@forEach
+                if (
+                    !tableSessionController.selectionStillCurrent(
+                        snapshot.id,
+                        selectionVersion,
+                        selected = true,
+                    ) || !tableSessionController.isContentOperationCurrent(contentToken)
+                ) return@forEach
+                val current = bookById(snapshot.id) ?: return@forEach
+                when (result) {
+                    is BookIndexLoadResult.Loaded -> {
+                        bookIndexLoadErrors.remove(snapshot.id)
+                        mergeHydratedBookIndex(current, result.book).also {
+                            replaceBook(it)
+                            accepted += it
+                        }
+                    }
+                    is BookIndexLoadResult.Missing -> {
+                        bookIndexLoadErrors[snapshot.id] = "Stored item index is missing"
+                        failures += snapshot.fileName
+                    }
+                    is BookIndexLoadResult.Failed -> {
+                        bookIndexLoadErrors[snapshot.id] =
+                            "Stored item index could not be read: ${result.message}"
+                        failures += snapshot.fileName
                     }
                 }
             }
-            pdf == null && tabs.isNotEmpty() -> activateCurrentTab()
-            else -> {
-                renderTabBar()
-                updatePageIndicator()
-                updateEmptyState()
+            if (tabs.isEmpty()) {
+                selectedBooks().firstOrNull { it.indexLoaded }?.let {
+                    tabs += ReaderTab(it.id, 0, "Start")
+                    activeTabIndex = 0
+                    currentPage = 0
+                }
             }
+            if (accepted.isNotEmpty()) {
+                persistSession()
+                rebuildBookmarkIndex()
+                accepted.filter(::isTextSearchable).forEach(::scheduleBookTextIndex)
+                refreshTextSearchScope()
+                refreshLibraryUi()
+                if (pdf == null && tabs.isNotEmpty()) activateCurrentTab() else renderTabBar()
+            } else {
+                refreshLibraryUi()
+            }
+            val action = if (replace) "Table now uses" else "Added to table:"
+            val failureSuffix = if (failures.isEmpty()) {
+                ""
+            } else {
+                " · ${failures.size} index load failure${if (failures.size == 1) "" else "s"}"
+            }
+            Toast.makeText(this, "$action $label$failureSuffix", Toast.LENGTH_LONG).show()
         }
     }
 
     private fun forgetLibraryItems(bookIds: Set<String>, deleteTagId: String?) {
+        if (!requireCatalogReady()) return
         val forgotten = books.filter { it.id in bookIds }
         if (forgotten.isEmpty()) return
-        ++bulkTableSelectionGeneration
-        capturePrimaryImageViewport()
-        captureReferenceImageViewport()
-        val previousActive = activeTabOrNull()
         val forgottenIds = forgotten.mapTo(HashSet()) { it.id }
-        val removedPrimary = pdfBookId in forgottenIds
-        val removedSecondary = prefetchBookId in forgottenIds
-
-        if (referenceLocation?.bookId in forgottenIds) closeReference(renderPrimary = false)
-        selectedBookIds.removeAll(forgottenIds)
-        tabs.filter { it.bookId in forgottenIds }.forEach(primaryImageViewports::remove)
-        tabs.filter { it.bookId in forgottenIds }.forEach(primaryMarkdownViewports::remove)
-        tabs.removeAll { it.bookId in forgottenIds }
+        val deletionTokens = forgottenIds.associateWith(tableSessionController::invalidateForgottenBook)
+        applyTableSelectionIntent(selectedBookIds - forgottenIds, persistChanges = false)
         forgottenIds.forEach { bookId ->
             unavailableBookIds.remove(bookId)
             unavailableBookErrors.remove(bookId)
-            referenceImageViewports.keys.removeAll { it.startsWith("$bookId|") }
+            bookIndexLoadErrors.remove(bookId)
             bookmarkVisitCounts.keys.removeAll { it.startsWith("$bookId|") }
             readerSessionRepository.deleteBookmarkVisits(bookId)
-            pageCache.removeBook(bookId)
-            textIndexTokens.remove(bookId)
         }
         books.removeAll { it.id in forgottenIds }
         if (deleteTagId != null) {
@@ -6575,18 +7206,9 @@ class MainActivity : Activity() {
         }
         forgotten.forEach { book ->
             releaseExactPersistedPermission(book.uri)
-            runCatching { bookRepository.delete(book.id) }
+            deleteAcceptedBookIndex(book.id, checkNotNull(deletionTokens[book.id]))
             deleteBookTextIndex(book.id)
         }
-
-        if (tabs.isEmpty()) {
-            selectedBooks().firstOrNull()?.let { tabs += ReaderTab(it.id, 0, "Start") }
-        }
-        activeTabIndex = previousActive
-            ?.let { previous -> tabs.indexOfFirst { it === previous } }
-            ?.takeIf { it >= 0 }
-            ?: if (tabs.isEmpty()) 0 else activeTabIndex.coerceIn(0, tabs.lastIndex)
-        currentPage = activeTabOrNull()?.pageIndex ?: 0
 
         persistBooks()
         persistSession()
@@ -6594,39 +7216,6 @@ class MainActivity : Activity() {
         refreshTextSearchScope()
         refreshLibraryUi()
         updateCachePins()
-
-        if (removedSecondary) submitPrefetchWork {
-            if (prefetchBookId in forgottenIds) {
-                prefetchPdf?.close()
-                prefetchPdf = null
-                prefetchBookId = null
-            }
-        }
-        when {
-            removedPrimary -> {
-                invalidateRendering(clearCache = true)
-                if (tabs.isNotEmpty()) {
-                    activateCurrentTab(forceReload = true)
-                } else {
-                    ++primaryOpenGeneration
-                    primaryOpenTargetBookId = null
-                    submitRenderWork {
-                        pdf?.close()
-                        pdf = null
-                        pdfBookId = null
-                    }
-                    renderTabBar()
-                    updatePageIndicator()
-                    updateEmptyState()
-                }
-            }
-            pdf == null && tabs.isNotEmpty() -> activateCurrentTab()
-            else -> {
-                renderTabBar()
-                updatePageIndicator()
-                updateEmptyState()
-            }
-        }
         if (books.isEmpty()) setStatus("Library is empty")
     }
 
@@ -6636,17 +7225,13 @@ class MainActivity : Activity() {
             action(book)
             return
         }
+        val contentToken = tableSessionController.captureContentOperation(bookId)
         setStatus("Loading ${book.title} metadata…")
-        submitPrefetchWork {
-            try {
-                val hydrated = bookRepository.hydrate(book)
-                mainHandler.post {
-                    if (isDestroyed || !replaceBook(hydrated)) return@post
-                    action(hydrated)
-                }
-            } catch (t: Throwable) {
-                showError("Could not load ${book.title}", t)
-            }
+        loadIndexForContentOperation(book, contentToken, requireLoadedIndex = true) { hydrated ->
+            val current = bookById(bookId) ?: return@loadIndexForContentOperation
+            val merged = mergeHydratedBookIndex(current, hydrated)
+            if (!replaceBook(merged)) return@loadIndexForContentOperation
+            action(merged)
         }
     }
 
@@ -6681,7 +7266,7 @@ class MainActivity : Activity() {
         updateKnownBookSource(
             bookId = book.id,
             uri = Uri.parse(book.uri),
-            metadata = documentMetadataReader.query(Uri.parse(book.uri)),
+            metadata = null,
             selectAndOpen = false,
             forceTextReindex = true,
             refreshReason = "Manual PDF refresh",
@@ -6689,55 +7274,91 @@ class MainActivity : Activity() {
     }
 
     private fun refreshMarkdownBook(book: BookRecord) {
-        setStatus("Refreshing ${book.title}…")
-        submitPrefetchWork {
+        val snapshot = bookById(book.id) ?: return
+        val contentToken = tableSessionController.beginContentOperation(book.id)
+        setStatus("Refreshing ${snapshot.title}…")
+        loadIndexForContentOperation(snapshot, contentToken) { hydrated ->
+            submitMaintenanceWork {
+            var document: MarkdownDocument? = null
             try {
-                val hydrated = if (book.indexLoaded) book else bookRepository.hydrate(book)
-                val document = MarkdownDocument(contentResolver, Uri.parse(book.uri), markdownEngine)
-                val metadata = documentMetadataReader.query(Uri.parse(book.uri))
-                val headings = outlineEntries(document, book.id, BookmarkSource.MARKDOWN_HEADING)
+                document = MarkdownDocument(
+                    contentResolver,
+                    Uri.parse(snapshot.uri),
+                    maintenanceMarkdownEngine,
+                )
+                val opened = checkNotNull(document)
+                val metadata = documentMetadataReader.query(Uri.parse(snapshot.uri))
+                val headings = outlineEntries(opened, snapshot.id, BookmarkSource.MARKDOWN_HEADING)
                 val updated = hydrated.copy(
                     title = metadata.fileName?.let(::cleanBookName) ?: hydrated.title,
                     fileName = metadata.fileName ?: hydrated.fileName,
-                    pageCount = document.pageCount,
+                    pageCount = opened.pageCount,
                     pdfBookmarks = headings,
                     storedBookmarkCount = headings.distinctBy { it.identityKey }.size,
                     indexVersion = CURRENT_BOOK_INDEX_VERSION,
                     indexLoaded = true,
                     sourceSize = metadata.size ?: hydrated.sourceSize,
                     sourceLastModified = metadata.lastModified ?: hydrated.sourceLastModified,
-                    sourceFingerprint = document.content.fingerprint,
+                    sourceFingerprint = opened.content.fingerprint,
                     sourceRevisionToken = UUID.randomUUID().toString(),
                 )
-                bookRepository.saveIndex(updated)
                 mainHandler.post {
-                    if (isDestroyed || !replaceBook(updated)) return@post
-                    unavailableBookIds.remove(book.id)
-                    unavailableBookErrors.remove(book.id)
+                    if (
+                        isDestroyed ||
+                        !tableSessionController.isContentOperationCurrent(contentToken)
+                    ) return@post
+                    val current = bookById(snapshot.id) ?: return@post
+                    val accepted = mergeSourceBookResult(current, updated)
+                    val retained = if (snapshot.id in selectedBookIds) accepted else accepted.copy(
+                        pdfBookmarks = emptyList(),
+                        externalBookmarks = emptyList(),
+                        imageFiles = emptyList(),
+                        storedBookmarkCount = accepted.bookmarkCount,
+                        indexLoaded = false,
+                    )
+                    if (!replaceBook(retained)) return@post
+                    saveAcceptedBookIndex(accepted, contentToken)
+                    unavailableBookIds.remove(snapshot.id)
+                    unavailableBookErrors.remove(snapshot.id)
                     lastSourceRefreshDiagnostic = sourceRefreshDiagnostic(
-                        book = hydrated,
+                        book = current,
                         metadata = metadata,
                         reason = "Manual note refresh",
-                        nextRevision = updated.sourceRevisionKey(),
+                        nextRevision = accepted.sourceRevisionKey(),
                     )
                     val destinations = headings.associateBy { it.identityKey }
-                    tabs.filter { it.bookId == book.id }.forEach { refreshedTab ->
+                    tabs.filter { it.bookId == snapshot.id }.forEach { refreshedTab ->
                         val destination = refreshedTab.anchorKey?.let(destinations::get)
                         refreshedTab.pageIndex = destination?.pageIndex
-                            ?: refreshedTab.pageIndex.coerceIn(0, updated.pageCount - 1)
+                            ?: refreshedTab.pageIndex.coerceIn(0, accepted.pageCount - 1)
                         refreshedTab.originPageIndex = destination?.pageIndex
-                            ?: refreshedTab.originPageIndex.coerceIn(0, updated.pageCount - 1)
+                            ?: refreshedTab.originPageIndex.coerceIn(0, accepted.pageCount - 1)
                         if (destination != null) refreshedTab.label = destination.title
                     }
                     persistBooks()
                     rebuildBookmarkIndex()
-                    scheduleBookTextIndex(updated, force = true)
+                    if (snapshot.id in selectedBookIds) {
+                        scheduleBookTextIndex(accepted, force = true)
+                    } else {
+                        deleteBookTextIndex(snapshot.id)
+                    }
                     refreshTextSearchScope()
                     refreshLibraryUi()
-                    Toast.makeText(this, "${updated.title} refreshed", Toast.LENGTH_SHORT).show()
+                    discardSecondaryDocument(snapshot.id)
+                    if (activeTabOrNull()?.bookId == snapshot.id) {
+                        activateCurrentTab(forceReload = true)
+                    } else if (referenceLocation?.bookId == snapshot.id) {
+                        renderReference()
+                    }
+                    Toast.makeText(this, "${accepted.title} refreshed", Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
-                showError("Note refresh failed", t)
+                if (tableSessionController.isContentOperationCurrent(contentToken)) {
+                    showError("Note refresh failed", t)
+                }
+            } finally {
+                document?.close()
+            }
             }
         }
     }
@@ -6745,7 +7366,6 @@ class MainActivity : Activity() {
     private fun rebuildBookTextIndex(bookId: String) {
         val book = bookById(bookId) ?: return
         if (!isTextSearchable(book)) return
-        textIndexErrors.remove(bookId)
         scheduleBookTextIndex(book, force = true)
         Toast.makeText(this, "Rebuilding text index for ${book.title}", Toast.LENGTH_SHORT).show()
         if (textSearchSession != null && bookId in selectedBookIds) refreshTextSearchResults()
@@ -6769,7 +7389,8 @@ class MainActivity : Activity() {
                 }.toTypedArray(),
                 selected,
             ) { dialog, which ->
-                replaceBook(book.copy(color = BOOK_COLORS[which]))
+                val current = bookById(bookId) ?: return@setSingleChoiceItems
+                replaceBook(current.copy(color = BOOK_COLORS[which]))
                 persistBooks()
                 renderTabBar()
                 updateReferenceUi()
@@ -6817,6 +7438,12 @@ class MainActivity : Activity() {
 
     private fun showLibraryMenu() {
         val actions = mutableListOf<Pair<String, () -> Unit>>()
+        if (!catalogReady()) {
+            actions += "Retry library load" to { loadLibraryCatalog() }
+            actions += "Diagnostics" to { showDiagnostics() }
+            showReaderActionList(actions, title = "Library", returnToMainOnCancel = true)
+            return
+        }
         actions += "Open library" to { showLibrary() }
         actions += "Add file" to { chooseLibraryDocument() }
         actions += "Add folder" to { chooseLibraryFolder() }
@@ -7042,10 +7669,39 @@ class MainActivity : Activity() {
             append("\nLibrary folders: ${libraryFolders.size}")
             append("\nLibrary tags: ${libraryTags.size}")
             append("\nSelected items: ${selectedBookIds.size}")
+            append("\nLibrary catalog: ")
+            append(
+                when (val state = catalogState) {
+                    BookCatalogState.Loading -> "loading"
+                    BookCatalogState.Missing -> "new / no saved catalog"
+                    is BookCatalogState.Loaded -> "loaded"
+                    is BookCatalogState.Failed -> "failed · ${state.failure.message}"
+                },
+            )
+            if (bookIndexLoadErrors.isNotEmpty()) {
+                append("\nItem index issues: ${bookIndexLoadErrors.size}")
+                bookIndexLoadErrors.entries.take(5).forEach { (bookId, error) ->
+                    append("\n• ${bookById(bookId)?.title ?: bookId} · $error")
+                }
+            }
+            libraryStorage.lastFailure()?.let { failure ->
+                append("\nLast storage issue: ${failure.operation.label} · ${failure.message}")
+            }
+            append("\nStorage status: $lastStorageDiagnostic")
             append("\nTheme: ${themeMode.label} → ${if (uiPalette.isDark) "Dark" else "Light"}")
             append("\nIndexed bookmarks: ${bookmarkIndex.size}")
             append("\nText index: %.1f MB".format(textSearchIndex.databaseBytes() / (1024.0 * 1024.0)))
-            append("\nText indexing jobs: ${textIndexTokens.size}")
+            append("\nText indexing jobs: ${textIndexCoordinator.activeJobCount()}")
+            val indexFailures = textIndexCoordinator.failures()
+            if (indexFailures.isNotEmpty()) {
+                append("\nText index failures:")
+                indexFailures.take(5).forEach { failure ->
+                    append("\n• ${bookById(failure.bookId)?.title ?: failure.bookId}")
+                    failure.pageIndex?.let { append(" · page ${it + 1}") }
+                    append(" · ${failure.message}")
+                }
+                if (indexFailures.size > 5) append("\n• ${indexFailures.size - 5} more")
+            }
             append("\nTabs: ${tabs.size}")
             append("\nLayout: ${readerLayoutMode.label} → ${resolvedReaderLayout().label}")
             append("\nDevice memory class: $deviceMemoryClassMb MB")
@@ -7067,6 +7723,8 @@ class MainActivity : Activity() {
                 }
             }
             append("\nLast source refresh: $lastSourceRefreshDiagnostic")
+            append("\nLast folder scan: $lastFolderScanDiagnostic")
+            append("\nLast reference render: $lastReferenceRenderDiagnostic")
             textSearchSession?.let { search ->
                 append("\nSearch reference: “${search.query}” · ${search.results.size}/${search.totalMatches} shown")
                 append(" · ${search.indexedPages}/${search.totalPages} parts")
@@ -7136,70 +7794,7 @@ class MainActivity : Activity() {
 
     private fun scheduleBookTextIndex(book: BookRecord, force: Boolean = false) {
         if (!isTextSearchable(book)) return
-        val sourceRevision = book.sourceRevisionKey()
-        val token = textIndexTokenSequence.incrementAndGet()
-        if (force) {
-            textIndexTokens[book.id] = token
-        } else if (textIndexTokens.putIfAbsent(book.id, token) != null) {
-            return
-        }
-        textIndexErrors.remove(book.id)
-
-        submitTextIndexWork {
-            var document: PdfDocument? = null
-            try {
-                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
-                if (textIndexTokens[book.id] != token || destroying) return@submitTextIndexWork
-                var progress = textSearchIndex.prepareBook(
-                    book.id,
-                    book.pageCount,
-                    sourceRevision,
-                    force,
-                )
-                if (progress.complete) {
-                    return@submitTextIndexWork
-                }
-                notifyTextIndexProgress(book.id)
-
-                val openedDocument = openDocument(book)
-                document = openedDocument
-                require(openedDocument.pageCount == book.pageCount) {
-                    "Document structure changed; refresh ${book.title}"
-                }
-                var nextPage = progress.indexedPages
-                while (
-                    nextPage < openedDocument.pageCount && !destroying &&
-                    textIndexTokens[book.id] == token && !Thread.currentThread().isInterrupted
-                ) {
-                    val endExclusive = min(nextPage + 12, openedDocument.pageCount)
-                    val batch = ArrayList<ExtractedTextPage>(endExclusive - nextPage)
-                    for (pageIndex in nextPage until endExclusive) {
-                        if (textIndexTokens[book.id] != token || destroying) return@submitTextIndexWork
-                        val text = runCatching { openedDocument.textForSearch(pageIndex) }.getOrDefault("")
-                        batch += ExtractedTextPage(pageIndex, text)
-                    }
-                    if (textIndexTokens[book.id] != token || destroying) return@submitTextIndexWork
-                    progress = textSearchIndex.storePages(
-                        book.id,
-                        openedDocument.pageCount,
-                        sourceRevision,
-                        batch,
-                    )
-                    nextPage = progress.indexedPages
-                    if (progress.complete || nextPage % 60 < batch.size) {
-                        notifyTextIndexProgress(book.id)
-                    }
-                }
-            } catch (t: Throwable) {
-                if (textIndexTokens[book.id] == token && !destroying) {
-                    textIndexErrors[book.id] = t.message ?: t.javaClass.simpleName
-                    notifyTextIndexProgress(book.id)
-                }
-            } finally {
-                document?.close()
-                textIndexTokens.remove(book.id, token)
-            }
-        }
+        textIndexCoordinator.schedule(book, force)
     }
 
     private fun notifyTextIndexProgress(bookId: String) {
@@ -7214,49 +7809,24 @@ class MainActivity : Activity() {
     }
 
     private fun deleteBookTextIndex(bookId: String) {
-        textIndexTokens[bookId] = textIndexTokenSequence.incrementAndGet()
-        submitTextIndexWork {
-            runCatching { textSearchIndex.deleteBook(bookId) }
-            textIndexTokens.remove(bookId)
-            mainHandler.post {
-                if (isDestroyed) return@post
-                bookById(bookId)
-                    ?.takeIf { it.id in selectedBookIds && isTextSearchable(it) }
-                    ?.let(::scheduleBookTextIndex)
-            }
-        }
-    }
-
-    private fun submitTextIndexWork(block: () -> Unit) {
-        try {
-            textIndexWorker.execute(block)
-        } catch (_: RejectedExecutionException) {
-            // Lifecycle teardown can race queued indexing notifications.
-        }
-    }
-
-    private fun submitTextSearchWork(block: () -> Unit) {
-        try {
-            textSearchFuture?.cancel(false)
-            textSearchFuture = textSearchWorker.submit(block)
-        } catch (_: RejectedExecutionException) {
-            // Lifecycle teardown can race queued search requests.
-        }
+        textIndexCoordinator.delete(bookId)
     }
 
     private fun submitRenderWork(block: () -> Unit) {
-        try {
-            renderWorker.execute(block)
-        } catch (_: RejectedExecutionException) {
-            // Lifecycle teardown can race a queued UI callback; dropping late work is correct.
-        }
+        readerWork.submitPrimary(block)
     }
 
     private fun submitPrefetchWork(block: () -> Unit) {
-        try {
-            prefetchWorker.execute(block)
-        } catch (_: RejectedExecutionException) {
-            // Lifecycle teardown can race a queued UI callback; dropping late work is correct.
+        readerWork.submitSecondary(block)
+    }
+
+    private fun submitSpeculativePrefetchWork(block: () -> Unit) {
+        readerWork.submitSpeculative(block)
+    }
+
+    private fun submitMaintenanceWork(block: () -> Unit) {
+        readerWork.submitMaintenance {
+            if (!destroying) block()
         }
     }
 

@@ -832,6 +832,9 @@ Implemented:
 
 Finish the V1 prototype checkpoint before adding another major feature.
 
+Follow the [V1 implementation plan](V1_IMPLEMENTATION_PLAN.md) for the reviewed
+correctness/performance fixes, focused refactoring, and verification before final acceptance.
+
 Completed V1 work:
 
 * higher-detail bounded image decoding
@@ -841,6 +844,12 @@ Completed V1 work:
 * Android 12 lifecycle, process-restoration, rotation, and memory-pressure validation
 * targeted `MainActivity` extraction for session storage and document metadata
 * process-owned full-text database lifecycle
+* indexed full-text page writes, stale-rebuild rejection, and resumable extraction failures
+* cancellable full-text queries with immutable requests and coalesced index-progress refreshes
+* centralized table transitions with stale source/index work rejection and ordered per-book index persistence
+* recoverable catalog loading and process-owned, off-main-thread library/index storage
+* isolated Android instrumentation package that cannot clear the personal prototype installation
+* isolated primary, reference/prefetch, and source-maintenance workers with explicit handle ownership and timing diagnostics
 * explicit release-build, naming, backup, and lint policy
 
 Final V1 acceptance pass:

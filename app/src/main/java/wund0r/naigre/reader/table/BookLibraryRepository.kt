@@ -20,18 +20,118 @@ data class BookLibraryState(
     val tags: List<LibraryTagRecord>,
 )
 
-class BookLibraryRepository(context: Context) {
-    private val catalog = File(context.filesDir, "book-library.json")
-    private val indexDirectory = File(context.filesDir, "book-index")
+const val CURRENT_LIBRARY_CATALOG_VERSION = 6
 
-    @Synchronized
-    fun load(): BookLibraryState {
+enum class CatalogFailureKind {
+    READ,
+    INVALID,
+    UNSUPPORTED_VERSION,
+}
+
+data class CatalogLoadFailure(
+    val kind: CatalogFailureKind,
+    val message: String,
+    val cause: Throwable? = null,
+)
+
+sealed interface BookCatalogState {
+    data object Loading : BookCatalogState
+    data object Missing : BookCatalogState
+    data class Loaded(val library: BookLibraryState) : BookCatalogState
+    data class Failed(val failure: CatalogLoadFailure) : BookCatalogState
+}
+
+sealed interface BookIndexLoadResult {
+    val book: BookRecord
+
+    data class Loaded(override val book: BookRecord) : BookIndexLoadResult
+    data class Missing(override val book: BookRecord) : BookIndexLoadResult
+    data class Failed(
+        override val book: BookRecord,
+        val message: String,
+        val cause: Throwable? = null,
+    ) : BookIndexLoadResult
+}
+
+interface BookLibraryStore {
+    fun readCatalog(): BookCatalogState
+    fun readIndex(book: BookRecord): BookIndexLoadResult
+    fun saveCatalog(library: BookLibraryState)
+    fun saveIndex(book: BookRecord)
+    fun deleteIndex(bookId: String)
+}
+
+class BookLibraryRepository internal constructor(
+    private val catalog: File,
+    private val indexDirectory: File,
+) : BookLibraryStore {
+    constructor(context: Context) : this(
+        File(context.applicationContext.filesDir, "book-library.json"),
+        File(context.applicationContext.filesDir, "book-index"),
+    )
+
+    override fun readCatalog(): BookCatalogState {
         if (!catalog.isFile) {
-            return BookLibraryState(emptyList(), linkedSetOf(), emptyList(), emptyList())
+            return BookCatalogState.Missing
         }
-        val root = JSONObject(catalog.readText(Charsets.UTF_8))
+        val contents = try {
+            catalog.readText(Charsets.UTF_8)
+        } catch (failure: Throwable) {
+            return BookCatalogState.Failed(
+                CatalogLoadFailure(
+                    CatalogFailureKind.READ,
+                    failure.message ?: failure.javaClass.simpleName,
+                    failure,
+                ),
+            )
+        }
+        val root = try {
+            JSONObject(contents)
+        } catch (failure: Throwable) {
+            return BookCatalogState.Failed(
+                CatalogLoadFailure(
+                    CatalogFailureKind.INVALID,
+                    "The library catalog is not valid JSON: ${failure.message ?: failure.javaClass.simpleName}",
+                    failure,
+                ),
+            )
+        }
+        val version = runCatching { root.getInt("version") }.getOrElse { failure ->
+            return BookCatalogState.Failed(
+                CatalogLoadFailure(
+                    CatalogFailureKind.UNSUPPORTED_VERSION,
+                    "The library catalog has no supported version",
+                    failure,
+                ),
+            )
+        }
+        if (version != CURRENT_LIBRARY_CATALOG_VERSION) {
+            return BookCatalogState.Failed(
+                CatalogLoadFailure(
+                    CatalogFailureKind.UNSUPPORTED_VERSION,
+                    "Library catalog version $version is unsupported; expected $CURRENT_LIBRARY_CATALOG_VERSION",
+                ),
+            )
+        }
+        return try {
+            BookCatalogState.Loaded(parseCatalog(root))
+        } catch (failure: Throwable) {
+            BookCatalogState.Failed(
+                CatalogLoadFailure(
+                    CatalogFailureKind.INVALID,
+                    "The library catalog is invalid: ${failure.message ?: failure.javaClass.simpleName}",
+                    failure,
+                ),
+            )
+        }
+    }
+
+    private fun parseCatalog(root: JSONObject): BookLibraryState {
+        val tagArray = root.getJSONArray("tags")
+        val selectedArray = root.getJSONArray("selected")
+        val bookArray = root.getJSONArray("books")
+        val folderArray = root.getJSONArray("folders")
         val tags = buildList<LibraryTagRecord> {
-            val tagArray = root.optJSONArray("tags") ?: JSONArray()
             for (index in 0 until tagArray.length()) {
                 val item = tagArray.getJSONObject(index)
                 val id = item.optString("id")
@@ -43,19 +143,17 @@ class BookLibraryRepository(context: Context) {
         }
         val knownTagIds = tags.mapTo(HashSet()) { it.id }
         val selected = linkedSetOf<String>().apply {
-            val array = root.optJSONArray("selected")
-            if (array != null) {
-                for (index in 0 until array.length()) add(array.getString(index))
-            }
+            for (index in 0 until selectedArray.length()) add(selectedArray.getString(index))
         }
-        val array = root.optJSONArray("books") ?: JSONArray()
-        val books = buildList {
-            for (index in 0 until array.length()) {
-                val item = array.getJSONObject(index)
+        val books = buildList<BookRecord> {
+            for (index in 0 until bookArray.length()) {
+                val item = bookArray.getJSONObject(index)
                 val id = item.getString("id")
-                val kind = runCatching {
-                    LibraryItemKind.valueOf(item.optString("kind", LibraryItemKind.PDF.name))
-                }.getOrDefault(LibraryItemKind.PDF)
+                require(id.isNotBlank()) { "Library item $index has no ID" }
+                require(none { it.id == id }) { "Duplicate library item ID: $id" }
+                val kind = LibraryItemKind.valueOf(item.getString("kind"))
+                val pageCount = item.getInt("pages")
+                require(pageCount > 0) { "${item.optString("title", id)} has no readable pages" }
                 val summary = BookRecord(
                     id = id,
                     title = item.getString("title"),
@@ -63,7 +161,7 @@ class BookLibraryRepository(context: Context) {
                     uri = item.getString("uri"),
                     kind = kind,
                     color = item.getInt("color"),
-                    pageCount = item.getInt("pages"),
+                    pageCount = pageCount,
                     pdfBookmarks = emptyList(),
                     externalBookmarks = emptyList(),
                     externalTocLabel = item.optNullableString("tocLabel"),
@@ -82,12 +180,11 @@ class BookLibraryRepository(context: Context) {
                         it in knownTagIds
                     },
                 )
-                add(if (id in selected) runCatching { hydrate(summary) }.getOrDefault(summary) else summary)
+                add(summary)
             }
         }
         selected.retainAll(books.mapTo(HashSet()) { it.id })
         val folders = buildList<LibraryFolderRecord> {
-            val folderArray = root.optJSONArray("folders") ?: JSONArray()
             for (index in 0 until folderArray.length()) {
                 val item = folderArray.getJSONObject(index)
                 val uri = item.optString("uri")
@@ -99,39 +196,53 @@ class BookLibraryRepository(context: Context) {
         return BookLibraryState(books, selected, folders, tags)
     }
 
-    @Synchronized
-    fun hydrate(book: BookRecord): BookRecord {
-        if (book.indexLoaded) return book
+    override fun readIndex(book: BookRecord): BookIndexLoadResult {
+        if (book.indexLoaded) return BookIndexLoadResult.Loaded(book)
         val file = indexFile(book.id)
-        if (!file.isFile) return book
-        val root = JSONObject(file.readText(Charsets.UTF_8))
-        return book.copy(
-            pdfBookmarks = decodeBookmarks(
-                root.optJSONArray("outline"),
-                book.id,
-                when (book.kind) {
-                    LibraryItemKind.IMAGE_COLLECTION -> BookmarkSource.IMAGE_FILE
-                    LibraryItemKind.MARKDOWN -> BookmarkSource.MARKDOWN_HEADING
-                    LibraryItemKind.PDF -> BookmarkSource.PDF_OUTLINE
-                },
-            ),
-            externalBookmarks = decodeBookmarks(root.optJSONArray("toc"), book.id, BookmarkSource.EXTERNAL_TOC),
-            imageFiles = decodeImageFiles(root.optJSONArray("images")),
-            indexLoaded = true,
-        )
+        if (!file.isFile) return BookIndexLoadResult.Missing(book)
+        return try {
+            val root = JSONObject(file.readText(Charsets.UTF_8))
+            val outline = root.getJSONArray("outline")
+            val toc = root.getJSONArray("toc")
+            val images = root.getJSONArray("images")
+            BookIndexLoadResult.Loaded(
+                book.copy(
+                    pdfBookmarks = decodeBookmarks(
+                        outline,
+                        book.id,
+                        when (book.kind) {
+                            LibraryItemKind.IMAGE_COLLECTION -> BookmarkSource.IMAGE_FILE
+                            LibraryItemKind.MARKDOWN -> BookmarkSource.MARKDOWN_HEADING
+                            LibraryItemKind.PDF -> BookmarkSource.PDF_OUTLINE
+                        },
+                    ),
+                    externalBookmarks = decodeBookmarks(
+                        toc,
+                        book.id,
+                        BookmarkSource.EXTERNAL_TOC,
+                    ),
+                    imageFiles = decodeImageFiles(images),
+                    indexLoaded = true,
+                ),
+            )
+        } catch (failure: Throwable) {
+            BookIndexLoadResult.Failed(
+                book,
+                failure.message ?: failure.javaClass.simpleName,
+                failure,
+            )
+        }
     }
 
-    @Synchronized
-    fun save(
-        books: List<BookRecord>,
-        selectedBookIds: Set<String>,
-        folders: List<LibraryFolderRecord>,
-        tags: List<LibraryTagRecord>,
-    ) {
+    override fun saveCatalog(library: BookLibraryState) {
+        val books = library.books
+        val selectedBookIds = library.selectedBookIds
+        val folders = library.folders
+        val tags = library.tags
         indexDirectory.mkdirs()
         val knownIds = books.mapTo(HashSet()) { it.id }
         val root = JSONObject()
-            .put("version", 6)
+            .put("version", CURRENT_LIBRARY_CATALOG_VERSION)
             .put(
                 "selected",
                 JSONArray().apply {
@@ -186,15 +297,13 @@ class BookLibraryRepository(context: Context) {
         atomicWrite(catalog, root.toString())
     }
 
-    @Synchronized
-    fun saveIndex(book: BookRecord) {
+    override fun saveIndex(book: BookRecord) {
         require(book.indexLoaded) { "Cannot save an unloaded book index" }
         indexDirectory.mkdirs()
         writeIndex(book)
     }
 
-    @Synchronized
-    fun delete(bookId: String) {
+    override fun deleteIndex(bookId: String) {
         Files.deleteIfExists(indexFile(bookId).toPath())
     }
 

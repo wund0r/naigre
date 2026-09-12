@@ -64,6 +64,24 @@ data class BookRecord(
     }
 }
 
+/** Applies only the separately persisted index payload to the current catalog record. */
+fun mergeHydratedBookIndex(current: BookRecord, hydrated: BookRecord): BookRecord {
+    require(current.id == hydrated.id)
+    return current.copy(
+        pdfBookmarks = hydrated.pdfBookmarks,
+        externalBookmarks = hydrated.externalBookmarks,
+        imageFiles = hydrated.imageFiles,
+        storedBookmarkCount = hydrated.bookmarkCount,
+        indexLoaded = hydrated.indexLoaded,
+    )
+}
+
+/** Source work owns the derived record, while color and tags remain user-owned. */
+fun mergeSourceBookResult(current: BookRecord, sourceResult: BookRecord): BookRecord {
+    require(current.id == sourceResult.id)
+    return sourceResult.copy(color = current.color, tagIds = current.tagIds)
+}
+
 /**
  * Stable identity for the source generation represented by a library record.
  *
