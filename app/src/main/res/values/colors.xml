@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#F5F1E8</color>
+    <color name="naigre_search_highlight">#D79921</color>
+
+    <!-- Warm, restrained neutrals inspired by Gruvbox. -->
+    <color name="naigre_dark_background">#1D2021</color>
+    <color name="naigre_dark_surface">#282828</color>
+    <color name="naigre_dark_surface_raised">#32302F</color>
+    <color name="naigre_dark_surface_selected">#3C3836</color>
+    <color name="naigre_dark_divider">#504945</color>
+    <color name="naigre_dark_text_primary">#EBDBB2</color>
+    <color name="naigre_dark_text_secondary">#BDAE93</color>
+    <color name="naigre_dark_text_muted">#A89984</color>
+    <color name="naigre_dark_accent">#D79921</color>
+    <color name="naigre_dark_on_accent">#1D2021</color>
+    <color name="naigre_dark_error">#FB4934</color>
+    <color name="naigre_dark_search_match">#FABD2F</color>
+    <color name="naigre_dark_page_placeholder">#928374</color>
+    <color name="naigre_dark_control_highlight">#33EBDBB2</color>
+
+    <color name="naigre_light_background">#EDE7D5</color>
+    <color name="naigre_light_surface">#F4F0E6</color>
+    <color name="naigre_light_surface_raised">#FBF8F0</color>
+    <color name="naigre_light_surface_selected">#E2DAC7</color>
+    <color name="naigre_light_divider">#CFC5AF</color>
+    <color name="naigre_light_text_primary">#3C3836</color>
+    <color name="naigre_light_text_secondary">#665C54</color>
+    <color name="naigre_light_text_muted">#75675D</color>
+    <color name="naigre_light_accent">#9D5C00</color>
+    <color name="naigre_light_on_accent">#FBF8F0</color>
+    <color name="naigre_light_error">#9D0006</color>
+    <color name="naigre_light_search_match">#9D5C00</color>
+    <color name="naigre_light_page_placeholder">#D5C4A1</color>
+    <color name="naigre_light_control_highlight">#333C3836</color>
+</resources>

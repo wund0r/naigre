@@ -1,0 +1,6 @@
+This project uses MuPDF through the Artifex Java/Android bindings.
+The application source is distributed under AGPL-3.0-or-later.
+See LICENSE and the MuPDF licensing terms for details.
+
+This project also uses Markwon, licensed under the Apache License 2.0,
+and its commonmark-java parser dependency, licensed under BSD-2-Clause.
