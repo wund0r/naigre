@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#F5F1E8</color>
     <color name="naigre_search_highlight">#D79921</color>
+    <color name="naigre_icon_background">#282828</color>
+    <color name="naigre_icon_paper">#ebdbb2</color>
+    <color name="naigre_icon_mustard">#d79921</color>
 
     <!-- Warm, restrained neutrals inspired by Gruvbox. -->
     <color name="naigre_dark_background">#1D2021</color>

@@ -1,5 +1,28 @@
 # NaIgre changelog
 
+## v26.09.0 — public beta candidate (not yet published)
+
+- Restored 12 dp left/right padding for book selectors in the search overlay and search reference pane.
+- First public-release preparation using `YY.MM.PATCH` calendar versions. Earlier prototype entries below retain their original version numbers.
+- Public APKs use a permanent release signing key; development and device-verification apps have separate package IDs and launcher labels.
+- Added a manual signed-APK preparation command with existing tests, release lint, certificate/identity checks, checksums and a source-revision report. Nothing is uploaded automatically.
+- Reworked the README around installation, Obtainium updates, first-use controls, file privacy/recovery and known limitations. Historical device checklists now live in TESTING.md; signing/publishing instructions live in RELEASING.md.
+- Includes the existing PDF/Markdown/map library, cross-book search, reference panes and the recent Markdown folding/search-highlight fixes documented below. Android “Open with” remains deferred.
+
+Existing prototype testers must reinstall once when switching signing keys, then re-add files. This clears app-owned setup/history but does not delete original documents. Subsequent public builds are intended to update in place.
+
+## v0.37.0 changes
+
+- Markdown heading taps cycle from collapsed to all descendant headings without body text, then to the complete subtree, then back to collapsed. Headings without subheadings keep the two-state open/close behavior.
+- Revealing a child's text or navigating to a search result makes the next parent tap collapse the subtree. Expanding the complete subtree clears individual child folds.
+- Fold markers distinguish closed (`▸`), headings-only (`▿`), and expanded/mixed (`▾`) sections. Per-tab/reference session state and scroll anchoring are retained.
+
+## v0.36.0 changes
+
+- Closing or replacing the full-text search reference clears temporary search highlights, including saved background-tab highlights and pending highlight results. PDF annotations remain unchanged.
+- Markdown headings have fold/unfold controls. Folding a heading hides its body and descendants; reopening it retains individually folded children.
+- Fold state and scroll position are retained independently for each tab and document reference during the session. Heading and full-text result navigation reveal the destination, while search continues to index the complete note.
+
 ## v0.35.0 changes
 
 - Tapping Search now always opens Navigate; holding Search opens Full text directly.
@@ -317,7 +340,7 @@
 - PDFs remain in their original location. Size/modification stamps trigger automatic outline and page-count refresh while **Refresh PDF** handles providers without reliable stamps.
 - Re-adding a known URI restores that logical book; matching filenames prompt before an annotated replacement is associated with existing history.
 - Named tables are deliberately omitted. The selected library books are one persisted, on-the-fly table.
-- This alpha storage format starts a new library; the old `book-table.json` and visit-counter format are not migrated.
+- This beta storage format starts a new library; the old `book-table.json` and visit-counter format are not migrated.
 
 ## v0.5.4 changes
 

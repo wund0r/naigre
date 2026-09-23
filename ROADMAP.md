@@ -90,6 +90,9 @@ The following features are already implemented and validated on real PDFs, inclu
 * text results show the closest heading and open the matching section in a primary tab
 * notes can also open in the temporary right/top reference pane
 * per-tab note scroll positions are retained for the current app session
+* headings cycle through collapsed, all descendant headings only, and fully expanded; revealing a child's text makes the next parent tap collapse the subtree
+* headings without subheadings use a two-state fold; visibility is retained independently per tab/reference for the current session
+* heading and text-result jumps expand the destination's ancestors; folded content remains searchable
 * direct file import and recursive campaign-folder scanning both discover notes
 * Obsidian/wiki links, editing, note graphs, and embedded local asset loading are deliberately excluded
 
@@ -830,42 +833,18 @@ Implemented:
 
 # Current Priority
 
-Finish the V1 prototype checkpoint before adding another major feature.
+Prepare the first public beta (`26.09.0`) with the existing reader feature set.
 
-Follow the [V1 implementation plan](V1_IMPLEMENTATION_PLAN.md) for the reviewed
-correctness/performance fixes, focused refactoring, and verification before final acceptance.
+The version scheme is `YY.MM.PATCH`, with a monthly release counter starting at zero
+and a separately increasing Android version code. Public builds retain
+`wund0r.naigre.reader`; debug and device-verification builds install independently.
+Use [RELEASING.md](RELEASING.md) for private signing setup, verified candidate
+preparation and the manual publication checklist. There is no automatic publisher
+or migration from the old debug-signed prototype.
 
-Completed V1 work:
-
-* higher-detail bounded image decoding
-* source-revision freshness across cache, outline, and full-text search
-* transparent progressive search result counts
-* inline missing-source recovery
-* Android 12 lifecycle, process-restoration, rotation, and memory-pressure validation
-* targeted `MainActivity` extraction for session storage and document metadata
-* process-owned full-text database lifecycle
-* indexed full-text page writes, stale-rebuild rejection, and resumable extraction failures
-* cancellable full-text queries with immutable requests and coalesced index-progress refreshes
-* centralized table transitions with stale source/index work rejection and ordered per-book index persistence
-* recoverable catalog loading and process-owned, off-main-thread library/index storage
-* isolated Android instrumentation package that cannot clear the personal prototype installation
-* isolated primary, reference/prefetch, and source-maintenance workers with explicit handle ownership and timing diagnostics
-* explicit release-build, naming, backup, and lint policy
-
-Final V1 acceptance pass:
-
-1. Confirm Diagnostics reports the intended V1 version and no stale source/text revision.
-2. Open a PDF, Markdown note, and image album from the current campaign folder.
-3. Search Navigate and Text across all books, then repeat with one book selected.
-4. Open results in the active tab, a new tab, and the temporary reference pane.
-5. Follow internal PDF links and confirm useful coordinate-aware tab names.
-6. Change tabs, pages, image zoom/pan, reference placement, and reader layout.
-7. Background, rotate, lock/wake in fullscreen, and cold-restart the app; confirm useful state returns.
-8. Rescan a campaign folder and refresh or relink a changed source without losing logical-book history.
-9. Confirm Markdown headings, tables, and full-text result jumps remain correct.
-10. Run `lintRelease` and `assembleRelease`, then review the merged release manifest and APK contents.
-11. Use the app in one real table session and record only navigation/search friction that affects speed.
-12. Create and protect one stable signing key before calling a build V1; never commit it or its passwords.
+Complete the signed-build/device/update acceptance and independent signing-key
+backup before publication. Use [TESTING.md](TESTING.md) for current and historical
+device checklists; unperformed checks remain pending.
 
 Do not immediately add major new features.
 

@@ -367,10 +367,10 @@ class MainActivity : Activity() {
     private val tabSearchHighlights = HashMap<String, SearchHighlightTarget>()
     private val primaryImageViewports = IdentityHashMap<ReaderTab, MutableMap<String, ReaderSurface.ViewportState>>()
     private val referenceImageViewports = HashMap<String, ReaderSurface.ViewportState>()
-    private val primaryMarkdownViewports = IdentityHashMap<ReaderTab, MarkdownSurface.ViewportState>()
+    private val primaryMarkdownStates = IdentityHashMap<ReaderTab, MarkdownSurface.ReadingState>()
     private var pendingPrimaryViewportRestore: PendingViewportRestore? = null
     private var pendingReferenceViewportRestore: PendingViewportRestore? = null
-    private var referenceMarkdownViewport: MarkdownSurface.ViewportState? = null
+    private var referenceMarkdownState = MarkdownSurface.ReadingState()
 
     private lateinit var root: FrameLayout
     private lateinit var readerContainer: LinearLayout
@@ -525,6 +525,7 @@ class MainActivity : Activity() {
         tableSessionController.restoreSelection(library.selectedBookIds, books.map { it.id })
         tabs.clear()
         tabSearchHighlights.clear()
+        primaryMarkdownStates.clear()
         restoreTabs(pendingTabRestoreState)
         pendingTabRestoreState = null
         bookIndexLoadErrors.clear()
@@ -3571,8 +3572,8 @@ class MainActivity : Activity() {
     private fun capturePrimaryImageViewport() {
         val tab = activeTabOrNull() ?: return
         if (bookById(tab.bookId)?.kind == LibraryItemKind.MARKDOWN && primaryMarkdownSurface.visibility == View.VISIBLE) {
+            if (!primaryMarkdownSurface.isShowing(primaryMarkdownStates[tab])) return
             val viewport = primaryMarkdownSurface.captureViewportState() ?: return
-            primaryMarkdownViewports[tab] = viewport
             tab.pageIndex = viewport.sectionIndex
             currentPage = viewport.sectionIndex
             return
@@ -3587,8 +3588,8 @@ class MainActivity : Activity() {
     private fun captureReferenceImageViewport() {
         referenceLocation?.takeIf { bookById(it.bookId)?.kind == LibraryItemKind.MARKDOWN }?.let { reference ->
             if (referenceMarkdownSurface.visibility == View.VISIBLE) {
+                if (!referenceMarkdownSurface.isShowing(referenceMarkdownState)) return
                 val viewport = referenceMarkdownSurface.captureViewportState() ?: return
-                referenceMarkdownViewport = viewport
                 reference.pageIndex = viewport.sectionIndex
                 return
             }
@@ -3667,7 +3668,7 @@ class MainActivity : Activity() {
 
     private fun clearCurrentImageViewports() {
         activeTabOrNull()?.let { tab ->
-            primaryMarkdownViewports.remove(tab)
+            primaryMarkdownStates[tab]?.requestNavigation()
             val saved = primaryImageViewports[tab]
             if (saved != null) {
                 imageUri(tab.bookId, tab.pageIndex)?.let { saved.remove(it) }
@@ -3678,7 +3679,7 @@ class MainActivity : Activity() {
             }
         }
         referenceLocation?.let { reference ->
-            if (bookById(reference.bookId)?.kind == LibraryItemKind.MARKDOWN) referenceMarkdownViewport = null
+            if (bookById(reference.bookId)?.kind == LibraryItemKind.MARKDOWN) referenceMarkdownState.requestNavigation()
             imageUri(reference.bookId, reference.pageIndex)?.let { uri ->
                 referenceImageViewports.remove("${reference.bookId}|$uri")
             }
@@ -3712,6 +3713,7 @@ class MainActivity : Activity() {
         if (next == currentPage) return
         capturePrimaryImageViewport()
         currentPage = next
+        primaryMarkdownStates[activeTab()]?.requestNavigation()
         activeTab().pageIndex = currentPage
         persistSession()
         // Deliberately do not rebuild tabs: page movement never changes tab identity/name.
@@ -3725,6 +3727,7 @@ class MainActivity : Activity() {
         if (next == reference.pageIndex) return
         captureReferenceImageViewport()
         reference.pageIndex = next
+        referenceMarkdownState.requestNavigation()
         reference.pendingDestinationY = null
         renderReference()
     }
@@ -3736,6 +3739,7 @@ class MainActivity : Activity() {
         if (clamped == currentPage) return
         capturePrimaryImageViewport()
         currentPage = clamped
+        primaryMarkdownStates[activeTab()]?.requestNavigation()
         activeTab().pageIndex = clamped
         persistSession()
         renderCurrent()
@@ -3748,6 +3752,7 @@ class MainActivity : Activity() {
         if (clamped == reference.pageIndex) return
         captureReferenceImageViewport()
         reference.pageIndex = clamped
+        referenceMarkdownState.requestNavigation()
         reference.pendingDestinationY = null
         renderReference()
     }
@@ -3867,14 +3872,22 @@ class MainActivity : Activity() {
     private fun openBookmark(entry: BookmarkEntry, newTabRequested: Boolean) {
         clearActiveSearchHighlight()
         capturePrimaryImageViewport()
+        val book = bookById(entry.bookId) ?: return
+        val clamped = entry.pageIndex.coerceIn(0, book.pageCount - 1)
         val existing = tabs.indexOfFirst { it.anchorKey == entry.identityKey }
         if (existing >= 0) {
-            switchToTab(existing)
+            if (book.kind == LibraryItemKind.MARKDOWN) {
+                primaryMarkdownStates[tabs[existing]]?.requestNavigation()
+                activeTabIndex = existing
+                tabs[existing].pageIndex = clamped
+                currentPage = clamped
+                activateCurrentTab()
+            } else {
+                switchToTab(existing)
+            }
             return
         }
 
-        val book = bookById(entry.bookId) ?: return
-        val clamped = entry.pageIndex.coerceIn(0, book.pageCount - 1)
         if (newTabRequested) {
             tabs += ReaderTab(entry.bookId, clamped, entry.title, entry.identityKey)
             activeTabIndex = tabs.lastIndex
@@ -3885,7 +3898,8 @@ class MainActivity : Activity() {
                 tabs.last()
             }
             tab.anchorKey?.let(tabSearchHighlights::remove)
-            primaryMarkdownViewports.remove(tab)
+            if (tab.bookId != entry.bookId) primaryMarkdownStates.remove(tab)
+            else primaryMarkdownStates[tab]?.requestNavigation()
             tab.bookId = entry.bookId
             tab.pageIndex = clamped
             tab.label = entry.title
@@ -3910,7 +3924,14 @@ class MainActivity : Activity() {
     private fun openBookmarkAlongside(entry: BookmarkEntry) {
         val book = bookById(entry.bookId) ?: return
         val existing = referenceLocation
-        if (existing?.anchorKey == entry.identityKey) return
+        if (existing?.anchorKey == entry.identityKey) {
+            if (book.kind == LibraryItemKind.MARKDOWN) {
+                referenceMarkdownState.requestNavigation()
+                existing.pageIndex = entry.pageIndex.coerceIn(0, book.pageCount - 1)
+                renderReference()
+            }
+            return
+        }
 
         val enteringSplit = !hasReferencePane()
         if (enteringSplit) {
@@ -3927,8 +3948,7 @@ class MainActivity : Activity() {
                 visibleFirstPage(currentPage, activeBook()?.pageCount ?: 1),
                 activeBook()?.pageCount ?: 1,
             ) != null
-        textSearchQueryRunner.cancel()
-        textSearchSession = null
+        endTextSearchSession()
         textSearchResultAdapter.notifyDataSetChanged()
         referenceLocation = ReferenceLocation(
             bookId = entry.bookId,
@@ -3939,7 +3959,7 @@ class MainActivity : Activity() {
             originDestinationY = entry.destinationY,
             pendingDestinationY = entry.destinationY,
         )
-        referenceMarkdownViewport = null
+        referenceMarkdownState = MarkdownSurface.ReadingState()
         ++prefetchGeneration
         if (switchingBook) {
             referenceSurface.clearPages()
@@ -3966,13 +3986,12 @@ class MainActivity : Activity() {
         stageViewportRestoresForLayout()
         ++renderGeneration
         referenceLocation = null
-        textSearchQueryRunner.cancel()
-        textSearchSession = null
+        endTextSearchSession()
         ++referenceRenderGeneration
         ++prefetchGeneration
         referenceSurface.clearPages()
         referenceMarkdownSurface.clear()
-        referenceMarkdownViewport = null
+        referenceMarkdownState = MarkdownSurface.ReadingState()
         referenceDisplayedPageKeys = emptySet()
         referencePendingPageKeys = emptySet()
         pendingReferenceViewportRestore = null
@@ -4089,7 +4108,7 @@ class MainActivity : Activity() {
         capturePrimaryImageViewport()
         val removed = tabs.removeAt(index)
         removed.anchorKey?.let(tabSearchHighlights::remove)
-        primaryMarkdownViewports.remove(removed)
+        primaryMarkdownStates.remove(removed)
         primaryImageViewports.remove(removed)
         activeTabIndex = when {
             index < activeTabIndex -> activeTabIndex - 1
@@ -4107,7 +4126,7 @@ class MainActivity : Activity() {
         val kept = tabs[index]
         tabs.filter { it !== kept }.mapNotNull { it.anchorKey }.forEach(tabSearchHighlights::remove)
         tabs.filter { it !== kept }.forEach(primaryImageViewports::remove)
-        tabs.filter { it !== kept }.forEach(primaryMarkdownViewports::remove)
+        tabs.filter { it !== kept }.forEach(primaryMarkdownStates::remove)
         tabs.clear()
         tabs += kept
         activeTabIndex = 0
@@ -4161,7 +4180,7 @@ class MainActivity : Activity() {
         val tab = tabs.getOrNull(index) ?: return
         val book = bookById(tab.bookId) ?: return
         capturePrimaryImageViewport()
-        primaryMarkdownViewports.remove(tab)
+        primaryMarkdownStates[tab]?.requestNavigation()
         tab.pageIndex = tab.originPageIndex.coerceIn(0, book.pageCount - 1)
         activeTabIndex = index
         currentPage = tab.pageIndex
@@ -4173,7 +4192,7 @@ class MainActivity : Activity() {
         val reference = referenceLocation ?: return
         val book = bookById(reference.bookId) ?: return
         captureReferenceImageViewport()
-        referenceMarkdownViewport = null
+        referenceMarkdownState.requestNavigation()
         reference.pageIndex = reference.originPageIndex.coerceIn(0, book.pageCount - 1)
         reference.pendingDestinationY = reference.originDestinationY
         renderReference()
@@ -4287,12 +4306,13 @@ class MainActivity : Activity() {
                     minimumWidth = 0
                     minHeight = 0
                     minimumHeight = 0
-                    setPadding(horizontalPadding, 0, horizontalPadding, 0)
                     typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
                     setTextColor(if (selected) uiPalette.textPrimary else uiPalette.textSecondary)
                     background = chromeButtonBackground(
                         if (selected) uiPalette.surfaceSelected else uiPalette.surfaceRaised,
                     )
+                    // Assign padding last: the inset background replaces the view's padding.
+                    setPadding(horizontalPadding, 0, horizontalPadding, 0)
                     contentDescription = if (book == null) {
                         "Search all table items"
                     } else {
@@ -5004,7 +5024,7 @@ class MainActivity : Activity() {
                 activeBook()?.pageCount ?: 1,
             ) != null
 
-        textSearchQueryRunner.cancel()
+        endTextSearchSession()
         searchMode = SearchMode.TEXT
         referenceLocation = null
         ++referenceRenderGeneration
@@ -5431,6 +5451,7 @@ class MainActivity : Activity() {
 
         val existing = tabs.indexOfFirst { it.anchorKey == anchorKey }
         if (existing >= 0) {
+            primaryMarkdownStates[tabs[existing]]?.requestNavigation()
             tabs[existing].pageIndex = pageIndex
             tabs[existing].originPageIndex = pageIndex
             if (existing == activeTabIndex) {
@@ -5449,7 +5470,8 @@ class MainActivity : Activity() {
         } else {
             val tab = activeTab()
             tab.anchorKey?.takeIf { it != anchorKey }?.let(tabSearchHighlights::remove)
-            primaryMarkdownViewports.remove(tab)
+            if (tab.bookId != hit.bookId) primaryMarkdownStates.remove(tab)
+            else primaryMarkdownStates[tab]?.requestNavigation()
             tab.apply {
                 bookId = hit.bookId
                 this.pageIndex = pageIndex
@@ -5560,8 +5582,7 @@ class MainActivity : Activity() {
         val highlight = activeSearchHighlight?.takeIf {
             it.bookId == bookId && it.pageIndex == currentPage && it.anchorKey == tab.anchorKey
         }
-        val restored = primaryMarkdownViewports[tab]
-            ?.takeIf { it.sectionIndex == currentPage && highlight == null }
+        val state = primaryMarkdownStates.getOrPut(tab) { MarkdownSurface.ReadingState() }
         readerSurface.clearPages()
         readerSurface.visibility = View.GONE
         primaryMarkdownSurface.visibility = View.VISIBLE
@@ -5572,7 +5593,7 @@ class MainActivity : Activity() {
             engine = markdownEngine,
             nextDocument = document,
             sectionIndex = currentPage,
-            restoredViewport = restored,
+            state = state,
             highlightTerms = highlight?.terms.orEmpty(),
             caseSensitive = highlight?.caseSensitive ?: false,
             highlightColor = colorWithAlpha(uiPalette.searchHighlight, 0xcc),
@@ -5620,8 +5641,7 @@ class MainActivity : Activity() {
                             engine = markdownEngine,
                             nextDocument = document,
                             sectionIndex = reference.pageIndex,
-                            restoredViewport = referenceMarkdownViewport
-                                ?.takeIf { it.sectionIndex == reference.pageIndex },
+                            state = referenceMarkdownState,
                             highlightColor = colorWithAlpha(uiPalette.searchHighlight, 0xcc),
                             highlightTextColor = uiPalette.textPrimary,
                         )
@@ -5803,14 +5823,22 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun endTextSearchSession() {
+        textSearchQueryRunner.cancel()
+        textSearchSession = null
+        tabSearchHighlights.clear()
+        clearActiveSearchHighlight()
+    }
+
     private fun clearActiveSearchHighlight() {
         activeSearchHighlight = null
         ++searchHighlightGeneration
         if (::readerSurface.isInitialized) readerSurface.clearSearchHighlights()
+        if (::primaryMarkdownSurface.isInitialized) primaryMarkdownSurface.clearSearchHighlights()
     }
 
     private fun selectSearchHighlightForTab(tab: ReaderTab) {
-        val next = tab.anchorKey?.let(tabSearchHighlights::get)
+        val next = if (textSearchSession != null) tab.anchorKey?.let(tabSearchHighlights::get) else null
         if (activeSearchHighlight == next) return
         activeSearchHighlight = next
         ++searchHighlightGeneration
@@ -6218,7 +6246,7 @@ class MainActivity : Activity() {
 
         if (transition.closeReference) closeReference(renderPrimary = false)
         tabs.filter { it.bookId in transition.removedBookIds }.forEach(primaryImageViewports::remove)
-        tabs.filter { it.bookId in transition.removedBookIds }.forEach(primaryMarkdownViewports::remove)
+        tabs.filter { it.bookId in transition.removedBookIds }.forEach(primaryMarkdownStates::remove)
         tabs.filter { it.bookId in transition.removedBookIds }
             .mapNotNull { it.anchorKey }
             .forEach(tabSearchHighlights::remove)

@@ -1,6 +1,48 @@
-This project uses MuPDF through the Artifex Java/Android bindings.
-The application source is distributed under AGPL-3.0-or-later.
-See LICENSE and the MuPDF licensing terms for details.
+NaIgre application source is distributed under AGPL-3.0-or-later.
+See LICENSE. Application source and build instructions:
+https://github.com/wund0r/naigre
 
-This project also uses Markwon, licensed under the Apache License 2.0,
-and its commonmark-java parser dependency, licensed under BSD-2-Clause.
+Runtime dependency inventory for the 26.09.0 candidate:
+
+MuPDF Java/Android bindings (com.artifex.mupdf:fitz:1.28.0)
+Copyright (c) 2006-2026 Artifex Software, Inc.
+Licensed under AGPL-3.0-or-later; see LICENSE and upstream COPYING.
+Android build and pinned native dependencies:
+https://github.com/ArtifexSoftware/mupdf-android-fitz/tree/e2190034d124004e335167f53b9b7aed52c370f4
+Native library and Java bindings:
+https://github.com/ArtifexSoftware/mupdf/tree/205b8cf43551279d1215e88fe2845c5d595bade9
+Check out the Android project recursively to obtain its native dependencies;
+a top-level GitHub ZIP does not include submodules.
+Third-party code, font, CMap and hyphenation notices: licenses/mupdf/.
+Portions of this software are copyright (C) 2026 The FreeType Project
+(https://freetype.org). All rights reserved. FreeType is used under the FTL.
+This software is based in part on the work of the Independent JPEG Group.
+
+Markwon core and ext-tables (io.noties.markwon, version 4.6.2)
+By Dimitry Ivanov and contributors; Apache License 2.0.
+Source: https://github.com/noties/Markwon/tree/v4.6.2
+License: licenses/Apache-2.0.txt
+
+commonmark-java and commonmark-ext-gfm-tables (version 0.13.0)
+Copyright (c) 2015-2016, Atlassian Pty Ltd; BSD-2-Clause.
+Source: https://github.com/commonmark/commonmark-java/tree/commonmark-parent-0.13.0
+License and copyright notice: licenses/commonmark-BSD-2-Clause.txt
+
+Kotlin standard library (org.jetbrains.kotlin:kotlin-stdlib:2.2.10)
+Copyright 2010-2024 JetBrains s.r.o. and Kotlin Programming Language contributors.
+Source: https://github.com/JetBrains/kotlin/tree/v2.2.10
+Apache License 2.0: licenses/Apache-2.0.txt
+Additional stdlib notices (GWT, Guava, ThreeTenBP, Boost): licenses/kotlin/.
+
+Annotations in the resolved runtime dependency graph:
+- androidx.annotation:annotation:1.1.0 (Android Open Source Project; Apache-2.0)
+  https://dl.google.com/dl/android/maven2/androidx/annotation/annotation/1.1.0/annotation-1.1.0-sources.jar
+- org.jetbrains:annotations:13.0 (JetBrains; Apache-2.0)
+  https://repo.maven.apache.org/maven2/org/jetbrains/annotations/13.0/annotations-13.0-sources.jar
+License: licenses/Apache-2.0.txt
+
+LICENSE, NOTICE and the licenses/ directory are bundled in each APK under
+assets/licenses/. See licenses/README.md for the provenance of copied notices.
+Keep matching NaIgre source and these upstream source links accessible beside
+the APK. Notices alone do not replace the corresponding-source requirement;
+see the publication checklist in RELEASING.md.

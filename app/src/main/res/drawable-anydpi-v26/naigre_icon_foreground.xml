@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from artwork/naigre-source.svg. Transparent outside paths. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group android:scaleX="0.0615" android:scaleY="0.0615"
+        android:translateX="15.90075" android:translateY="18.17625">
+        <path android:name="rear_book"
+            android:fillColor="@color/naigre_icon_mustard"
+            android:pathData="M 281,221 H 744 C 750,221 751,225 747,232 L 732,256 Q 728,262 727,268 H 252 C 233,268 221,276 221,289 C 221,303 233,311 252,311 H 760 C 778,311 786,322 786,338 V 375 C 737,390 694,414 665,448 C 617,390 502,367 345,367 C 300,367 275,390 275,429 V 832 H 258 C 216,832 192,809 192,768 V 307 C 192,260 231,221 281,221 Z" />
+        <path android:name="tab"
+            android:fillColor="@color/naigre_icon_mustard"
+            android:pathData="M 1010,526 H 1077 C 1100,526 1112,539 1112,562 V 665 C 1112,688 1100,701 1077,701 H 1010 Z" />
+        <path android:name="left_page"
+            android:fillColor="@color/naigre_icon_paper"
+            android:pathData="M 347,385 C 475,385 591,417 635,469 C 645,481 650,495 650,512 V 1006 C 580,932 464,913 337,924 C 313,926 300,913 300,890 V 429 C 300,400 316,385 347,385 Z" />
+        <path android:name="right_page"
+            android:fillColor="@color/naigre_icon_paper"
+            android:pathData="M 983,377 C 850,377 737,414 695,466 C 685,478 681,492 681,512 V 1006 C 747,936 864,911 996,924 C 1022,926 1035,913 1035,891 V 423 C 1035,392 1018,377 983,377 Z" />
+    </group>
+</vector>

@@ -26,15 +26,6 @@ import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.Locale
 
-data class MarkdownSection(
-    val index: Int,
-    val title: String,
-    val path: String,
-    val start: Int,
-    val end: Int,
-    val stableKey: String,
-)
-
 data class MarkdownContent(
     val rendered: Spanned,
     val plainText: String,
@@ -86,6 +77,8 @@ class MarkdownEngine(context: android.content.Context) {
                     .ifEmpty { "heading" }
                 val occurrence = (keyCounts[baseKey] ?: 0) + 1
                 keyCounts[baseKey] = occurrence
+                var bodyStart = end
+                while (bodyStart < plainText.length && plainText[bodyStart] in "\r\n") bodyStart++
                 provisional += MarkdownSection(
                     index = provisional.size,
                     title = title,
@@ -93,10 +86,15 @@ class MarkdownEngine(context: android.content.Context) {
                     start = start,
                     end = headingSpans.getOrNull(headingIndex + 1)?.first ?: plainText.length,
                     stableKey = "markdown:$baseKey#$occurrence",
+                    headingLevel = level,
+                    headingEnd = end,
+                    bodyStart = bodyStart,
                 )
             }
         }
-        val sections = provisional.mapIndexed { index, section -> section.copy(index = index) }
+        // Search sections still end at the very next heading. A fold includes descendants
+        // and ends at the next peer/ancestor instead; do not change search page identities.
+        val sections = markdownSubtreeBounds(provisional, plainText.length)
         val searchTextBySection = extractSearchText(root, sections)
         return MarkdownContent(rendered, plainText, sections, searchTextBySection, sha256(source))
     }
