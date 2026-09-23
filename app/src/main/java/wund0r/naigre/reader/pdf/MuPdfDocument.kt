@@ -2,6 +2,7 @@
 
 package wund0r.naigre.reader.pdf
 
+import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Matrix
@@ -98,9 +99,11 @@ class MuPdfDocument private constructor(
 
     init {
         pages = try {
-            require(document.isPDF()) { "Selected file is not a PDF" }
-            require(!document.needsPassword()) { "Password-protected PDFs are not supported yet" }
-            document.countPages().also { require(it > 0) { "PDF has no pages" } }
+            if (!document.isPDF()) throw DocumentReadException(DocumentReadProblem.NOT_PDF)
+            if (document.needsPassword()) throw DocumentReadException(DocumentReadProblem.PASSWORD_PROTECTED)
+            document.countPages().also {
+                if (it <= 0) throw DocumentReadException(DocumentReadProblem.EMPTY_PDF)
+            }
         } catch (t: Throwable) {
             try {
                 document.destroy()
@@ -113,6 +116,23 @@ class MuPdfDocument private constructor(
 
     override val pageCount: Int
         get() = pages
+
+    /** Small library preview: bound BOTH dimensions and skip link/annotation metadata extraction. */
+    fun renderThumbnail(maxWidthPx: Int, maxHeightPx: Int): Bitmap {
+        check(!closed)
+        require(maxWidthPx > 1 && maxHeightPx > 1)
+        val page = document.loadPage(0)
+        try {
+            val bounds = page.getBounds()
+            val width = bounds.x1 - bounds.x0
+            val height = bounds.y1 - bounds.y0
+            require(width.isFinite() && height.isFinite() && width > 0 && height > 0)
+            val scale = minOf((maxWidthPx - 1) / width, (maxHeightPx - 1) / height)
+            return AndroidDrawDevice.drawPage(page, Matrix.Scale(scale))
+        } finally {
+            page.destroy()
+        }
+    }
 
     override fun renderPage(pageIndex: Int, targetWidthPx: Int): RenderedPdfPage {
         check(!closed) { "PDF document is closed" }

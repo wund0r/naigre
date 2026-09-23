@@ -833,7 +833,9 @@ Implemented:
 
 # Current Priority
 
-Prepare the first public beta (`26.09.0`) with the existing reader feature set.
+Prepare the next public beta (`26.09.1`, build 64): English/Russian UI, compact
+library previews, library settings/tag controls and custom book colors. The first
+public beta (`26.09.0`) was published on 2026-09-23.
 
 The version scheme is `YY.MM.PATCH`, with a monthly release counter starting at zero
 and a separately increasing Android version code. Public builds retain

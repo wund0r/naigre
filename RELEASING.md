@@ -11,7 +11,7 @@ The single version source is `app/build.gradle.kts`:
 - `PATCH`: start at `0` each month and increment for every published release,
   including features and fixes. Use the release month, not the build machine's clock.
 - `versionCode`: a separate increasing integer; **never reset it** with the month/year.
-- GitHub tag: `v26.09.0`; APK: `NaIgre-26.09.0.apk`.
+- GitHub tag: `v26.09.1`; APK: `NaIgre-26.09.1.apk` for the current candidate.
 - Leave historical tags/changelog entries intact. CalVer is not strict SemVer;
   do not use a SemVer validator that rejects the leading zero in the month.
 
@@ -79,10 +79,10 @@ release lint, builds the release APK, and verifies:
 - APK ZIP alignment, including 16 KB alignment of uncompressed native libraries.
   This is a packaging check, not a substitute for running on a 16 KB-page device.
 
-Output is under `build/public-release/26.09.0/` for the current candidate:
+Output is under `build/public-release/26.09.1/` for the current candidate:
 
-- `NaIgre-26.09.0.apk` — the one universal installable APK.
-- `NaIgre-26.09.0.apk.sha256` — APK checksum.
+- `NaIgre-26.09.1.apk` — the one universal installable APK.
+- `NaIgre-26.09.1.apk.sha256` — APK checksum.
 - `release-info.txt` — identity, signer fingerprint, checksum, Git revision and dirty-tree status.
 - `LICENSE`, `NOTICE` and `licenses/` — license texts/notices, also bundled in the APK.
 
@@ -98,6 +98,18 @@ Without `NAIGRE_SIGNING_PROPERTIES`, debug and verification builds work normally
 `app-debug.apk`, or the verification APK. Minification/resource shrinking remain disabled.
 
 ## Acceptance before publishing
+
+Current candidate: **26.09.1 (64)**, updating the published **26.09.0 (63)**.
+Use [the prepared release notes](releases/26.09.1.md) after acceptance. The draft
+source-tag links become valid only after the matching source is committed/tagged
+and pushed. Keep the GitHub release marked **Prerelease** during beta.
+
+For this update, pay particular attention to preserved library/tags/visits/tabs,
+Russian UI and large-font layouts, preview loading with real campaign folders,
+and saved custom colors. The existing verification apps on both personal devices
+are reserved for manual testing: do not run connected tests that reinstall/remove
+them without first arranging to preserve any manual setup. Local JVM tests and
+`preparePublicRelease` do not touch installed apps.
 
 - [ ] Complete the current [signed-device checklist](TESTING.md). Test the actual release build.
 - [ ] Exercise a real higher-version update signed with the same key. Do not uninstall between versions.

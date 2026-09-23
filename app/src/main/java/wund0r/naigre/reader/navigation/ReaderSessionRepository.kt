@@ -28,6 +28,8 @@ class ReaderSessionRepository(context: Context) {
         private const val STATE_TAB_PAGES = "tab-pages"
         private const val STATE_TAB_BOOKS = "tab-books"
         private const val STATE_TAB_LABELS = "tab-labels"
+        private const val STATE_TAB_LABEL_KINDS = "tab-label-kinds"
+        private const val STATE_TAB_LABEL_PAGES = "tab-label-pages"
         private const val STATE_TAB_ANCHORS = "tab-anchors"
         private const val STATE_TAB_ORIGINS = "tab-origins"
         private const val STATE_ACTIVE_TAB = "active-tab"
@@ -52,6 +54,8 @@ class ReaderSessionRepository(context: Context) {
                         .put("book", tab.bookId)
                         .put("page", tab.pageIndex)
                         .put("label", tab.label)
+                        .put("labelKind", tab.labelKind.name)
+                        .put("labelPage", tab.labelPageIndex)
                         .put("anchor", tab.anchorKey ?: "")
                         .put("originPage", tab.originPageIndex),
                 )
@@ -71,6 +75,8 @@ class ReaderSessionRepository(context: Context) {
         outState.putIntegerArrayList(STATE_TAB_PAGES, ArrayList(tabs.map { it.pageIndex }))
         outState.putStringArrayList(STATE_TAB_BOOKS, ArrayList(tabs.map { it.bookId }))
         outState.putStringArrayList(STATE_TAB_LABELS, ArrayList(tabs.map { it.label }))
+        outState.putStringArrayList(STATE_TAB_LABEL_KINDS, ArrayList(tabs.map { it.labelKind.name }))
+        outState.putIntegerArrayList(STATE_TAB_LABEL_PAGES, ArrayList(tabs.map { it.labelPageIndex }))
         outState.putStringArrayList(STATE_TAB_ANCHORS, ArrayList(tabs.map { it.anchorKey.orEmpty() }))
         outState.putIntegerArrayList(STATE_TAB_ORIGINS, ArrayList(tabs.map { it.originPageIndex }))
         outState.putInt(STATE_ACTIVE_TAB, activeTabIndex)
@@ -104,6 +110,8 @@ class ReaderSessionRepository(context: Context) {
         val pages = state?.getIntegerArrayList(STATE_TAB_PAGES)
         val bookIds = state?.getStringArrayList(STATE_TAB_BOOKS)
         val labels = state?.getStringArrayList(STATE_TAB_LABELS)
+        val labelKinds = state?.getStringArrayList(STATE_TAB_LABEL_KINDS)
+        val labelPages = state?.getIntegerArrayList(STATE_TAB_LABEL_PAGES)
         val anchors = state?.getStringArrayList(STATE_TAB_ANCHORS)
         val origins = state?.getIntegerArrayList(STATE_TAB_ORIGINS)
         if (
@@ -119,6 +127,8 @@ class ReaderSessionRepository(context: Context) {
                 bookId = bookIds[index],
                 pageIndex = pages[index].coerceIn(0, pageCount - 1),
                 label = labels[index],
+                labelKind = labelKind(labelKinds?.getOrNull(index)),
+                labelPageIndex = (labelPages?.getOrNull(index) ?: pages[index]).coerceIn(0, pageCount - 1),
                 anchorKey = anchors?.getOrNull(index)?.takeIf { it.isNotBlank() },
                 originPageIndex = (origins?.getOrNull(index) ?: pages[index])
                     .coerceIn(0, pageCount - 1),
@@ -147,7 +157,9 @@ class ReaderSessionRepository(context: Context) {
                     restored += ReaderTab(
                         bookId = bookId,
                         pageIndex = pageIndex.coerceIn(0, pageCount - 1),
-                        label = item.optString("label", "Page"),
+                        label = item.optString("label", ""),
+                        labelKind = if (item.has("label")) labelKind(item.optString("labelKind")) else TabLabelKind.PAGE,
+                        labelPageIndex = item.optInt("labelPage", pageIndex).coerceIn(0, pageCount - 1),
                         anchorKey = item.optString("anchor", "").takeIf { it.isNotBlank() },
                         originPageIndex = item.optInt("originPage", pageIndex)
                             .coerceIn(0, pageCount - 1),
@@ -164,4 +176,7 @@ class ReaderSessionRepository(context: Context) {
         }
         return RestoredReaderTabs(restored, activeTabIndex)
     }
+
+    private fun labelKind(value: String?): TabLabelKind =
+        TabLabelKind.entries.firstOrNull { it.name == value } ?: TabLabelKind.TEXT
 }

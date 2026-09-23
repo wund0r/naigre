@@ -18,6 +18,8 @@ import org.commonmark.node.Node
 import org.commonmark.node.SoftLineBreak
 import org.commonmark.node.Text
 import wund0r.naigre.reader.pdf.PdfAnnotationInfo
+import wund0r.naigre.reader.pdf.DocumentReadException
+import wund0r.naigre.reader.pdf.DocumentReadProblem
 import wund0r.naigre.reader.pdf.PdfDocument
 import wund0r.naigre.reader.pdf.PdfOutlineEntry
 import wund0r.naigre.reader.pdf.PdfRect
@@ -156,13 +158,13 @@ class MarkdownDocument(
 
     init {
         val source = contentResolver.openInputStream(uri).use { input ->
-            requireNotNull(input) { "Could not open Markdown note" }
+            if (input == null) throw DocumentReadException(DocumentReadProblem.CANNOT_OPEN_NOTE)
             val output = ByteArrayOutputStream()
             val buffer = ByteArray(16 * 1024)
             while (true) {
                 val count = input.read(buffer)
                 if (count < 0) break
-                require(output.size() + count <= MAX_NOTE_BYTES) { "Markdown note is larger than 8 MB" }
+                if (output.size() + count > MAX_NOTE_BYTES) throw DocumentReadException(DocumentReadProblem.NOTE_TOO_LARGE)
                 output.write(buffer, 0, count)
             }
             output.toString(Charsets.UTF_8.name())

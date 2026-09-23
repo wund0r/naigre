@@ -6,6 +6,9 @@ NaIgre is built for looking things up at the table, especially at TTRPG sessions
 
 **Status: public beta.** A version in the source tree does not mean an APK has been published yet.
 
+This README describes the **26.09.1 release candidate**. See GitHub Releases for
+published APKs; the `26.09.0` APK does not include the new language and library UI features below.
+
 ## Install
 
 Requires **Android 8.0 or newer (API 26+)**. Phones and tablets are supported.
@@ -33,6 +36,17 @@ and your settings; an update may still require confirmation.
 
 ## NaIgre 101
 
+### Interface language
+
+NaIgre supports English and Russian, following the device's language
+preferences. On Android 13+, you can also choose a language just for NaIgre in
+Android's app language settings. On Android 12 and earlier, changing NaIgre's
+language requires changing the device language; there is no in-app language picker.
+Documents, filenames and tags are never translated. Technical diagnostics remain
+English.
+
+### Getting started
+
 1. Download files you need to reference, put them in one directory on your device.
 2. Open Naigre. In **Library**, use **Add folder** to add the campaign directory (or **Add File** for individual file)
 3. Folder import searches recursively:
@@ -49,6 +63,12 @@ selected subset searched during the current session. Taking an item off the tabl
 retains its tags, TOC and visit history. Library tags let you filter or add/replace
 a whole campaign's table in one action.
 
+Library cards share the same size, with a compact preview on the left: first PDF
+page, first album image, or the first few Markdown headings. Images fit without
+cropping. Previews load in the background and are cached; missing sources show a
+cached preview or a placeholder. Detected source updates/explicit refreshes update
+previews too. Forgetting an item clears its cached previews, not its source files.
+
 ## Useful controls
 
 | Action | Behavior |
@@ -64,8 +84,12 @@ a whole campaign's table in one action.
 | Tap a Markdown heading | Cycle collapsed → descendant headings only → fully expanded; a leaf heading simply toggles |
 | Tap the page indicator | Jump directly to a page |
 
-Book colors identify the same item across library, tabs and search. The search
-book-selector row narrows either search mode to one item. Switching modes retains
+Book colors identify the same item across library, tabs and search. In the book's
+**⋮ → Choose color**, pick a preset or **Custom…**: adjust hue, saturation and
+brightness, or enter `#RRGGBB`. The swatch and tab preview update immediately;
+**Apply** saves the color, while **Cancel** leaves it unchanged.
+
+The search book-selector row narrows either search mode to one item. Switching modes retains
 your query; reopening Search normally starts empty.
 
 Navigate uses smartcase: lowercase is case-insensitive, capitals make it
@@ -74,6 +98,11 @@ is case-insensitive. Use **Show more** when further matches are available. Image
 
 The reference pane is on the right in Wide layout and above the main reader in
 Tall layout. Change layout/theme/fullscreen in **Menu → Interface**.
+The Library's top-left **⋮** menu also provides Reading view, Interface and
+Diagnostics, without needing to open a book. Changing theme keeps the Library
+open with the same tag filter.
+Its filter strip groups All, On table and Untagged first; custom tags follow a
+divider and have outline tag icons. The whole strip scrolls horizontally.
 
 Markdown supports headings, tables and session-only folding. Heading/search jumps
 reveal folded destinations. If you reveal a child's body in headings-only mode,

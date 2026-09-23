@@ -5,6 +5,7 @@
     android:dataExtractionRules="@xml/backup_rules"
     android:fullBackupContent="@xml/backup_rules_legacy"
     android:label="@string/app_name"
+    android:localeConfig="@xml/locale_config"
     android:supportsRtl="true"
     android:icon="@mipmap/ic_naigre_launcher"
     android:roundIcon="@mipmap/ic_naigre_launcher_round"

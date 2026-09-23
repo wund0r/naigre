@@ -61,9 +61,12 @@ import wund0r.naigre.reader.navigation.ExternalTocParser
 import wund0r.naigre.reader.navigation.FuzzyMatcher
 import wund0r.naigre.reader.navigation.ReaderSessionRepository
 import wund0r.naigre.reader.navigation.ReaderTab
+import wund0r.naigre.reader.navigation.TabLabelKind
+import wund0r.naigre.reader.navigation.TabTitle
 import wund0r.naigre.reader.markdown.MarkdownDocument
 import wund0r.naigre.reader.markdown.MarkdownEngine
 import wund0r.naigre.reader.pdf.ImageCollectionDocument
+import wund0r.naigre.reader.pdf.DocumentReadException
 import wund0r.naigre.reader.pdf.ImageDecodePolicy
 import wund0r.naigre.reader.pdf.MuPdfDocument
 import wund0r.naigre.reader.pdf.PdfAnnotationInfo
@@ -91,6 +94,7 @@ import wund0r.naigre.reader.table.BookIndexLoadResult
 import wund0r.naigre.reader.table.BookLibraryState
 import wund0r.naigre.reader.table.BookLibraryStorage
 import wund0r.naigre.reader.table.BookStorageFailure
+import wund0r.naigre.reader.table.BookStorageOperation
 import wund0r.naigre.reader.table.CURRENT_BOOK_INDEX_VERSION
 import wund0r.naigre.reader.table.DocumentMetadata
 import wund0r.naigre.reader.table.DocumentMetadataReader
@@ -100,6 +104,11 @@ import wund0r.naigre.reader.table.LibraryItemKind
 import wund0r.naigre.reader.table.LibraryTagRecord
 import wund0r.naigre.reader.table.TableSelectionTransition
 import wund0r.naigre.reader.table.TableSessionController
+import wund0r.naigre.reader.ui.LibraryHeader
+import wund0r.naigre.reader.ui.LibraryCardView
+import wund0r.naigre.reader.ui.LibraryPreviewLoader
+import wund0r.naigre.reader.ui.BookColorPicker
+import wund0r.naigre.reader.ui.RgbColor
 import wund0r.naigre.reader.table.mergeHydratedBookIndex
 import wund0r.naigre.reader.table.mergeSourceBookResult
 import wund0r.naigre.reader.table.sourceRevisionKey
@@ -141,6 +150,10 @@ class MainActivity : Activity() {
         private const val STATE_PAGE = "page"
         private const val STATE_SPREAD = "spread"
         private const val STATE_SPREAD_SKIP_COVER = "spread-skip-cover"
+        private const val STATE_IMMERSIVE = "immersive"
+        private const val STATE_LIBRARY_OPEN = "library-open"
+        private const val STATE_LIBRARY_FILTER = "library-filter"
+        private const val STATE_LIBRARY_TAG = "library-tag"
         private const val IMAGE_CACHE_WIDTH_SENTINEL = 1
 
         private val BOOK_COLORS = intArrayOf(
@@ -153,8 +166,9 @@ class MainActivity : Activity() {
             0xffc383a1.toInt(),
             0xff9aa86e.toInt(),
         )
-        private val BOOK_COLOR_NAMES = arrayOf(
-            "Blue", "Coral", "Green", "Violet", "Amber", "Teal", "Rose", "Olive",
+        private val BOOK_COLOR_NAMES = intArrayOf(
+            R.string.color_blue, R.string.color_coral, R.string.color_green, R.string.color_violet,
+            R.string.color_amber, R.string.color_teal, R.string.color_rose, R.string.color_olive,
         )
     }
 
@@ -184,10 +198,10 @@ class MainActivity : Activity() {
         INDEX_PROGRESS,
     }
 
-    private enum class ReaderLayoutMode(val label: String) {
-        AUTOMATIC("Automatic"),
-        WIDE("Wide"),
-        TALL("Tall"),
+    private enum class ReaderLayoutMode(val labelRes: Int) {
+        AUTOMATIC(R.string.layout_automatic),
+        WIDE(R.string.layout_wide),
+        TALL(R.string.layout_tall),
     }
 
     private enum class LibraryFilterKind {
@@ -196,6 +210,8 @@ class MainActivity : Activity() {
         TAG,
         UNTAGGED,
     }
+
+    private enum class MenuContext { READER, LIBRARY }
 
     private data class LibraryFilter(
         val kind: LibraryFilterKind,
@@ -342,7 +358,9 @@ class MainActivity : Activity() {
     private var pendingTocBookId: String? = null
     private var pendingRelinkBookId: String? = null
     private var libraryDialog: Dialog? = null
+    private var restoreLibraryAfterLoad = false
     private var libraryAdapter: BaseAdapter? = null
+    private var libraryPreviewLoader: LibraryPreviewLoader? = null
     private var librarySelectionLabel: TextView? = null
     private var libraryTagStrip: LinearLayout? = null
     private var libraryEmptyLabel: TextView? = null
@@ -442,6 +460,14 @@ class MainActivity : Activity() {
         pageCache = PageBitmapCache(cacheMb * 1024L * 1024L)
 
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        immersive = savedInstanceState?.getBoolean(STATE_IMMERSIVE) ?: false
+        restoreLibraryAfterLoad = savedInstanceState?.getBoolean(STATE_LIBRARY_OPEN) ?: false
+        libraryFilter = LibraryFilter(
+            runCatching {
+                LibraryFilterKind.valueOf(savedInstanceState?.getString(STATE_LIBRARY_FILTER).orEmpty())
+            }.getOrDefault(LibraryFilterKind.ALL),
+            savedInstanceState?.getString(STATE_LIBRARY_TAG),
+        )
         currentPage = savedInstanceState?.getInt(STATE_PAGE, 0) ?: 0
         spreadMode = savedInstanceState?.getBoolean(STATE_SPREAD)
             ?: prefs.getBoolean(
@@ -478,7 +504,8 @@ class MainActivity : Activity() {
         pendingTabRestoreState = savedInstanceState
 
         buildUi()
-        setStatus("Loading library…")
+        applyImmersiveMode(immersive)
+        setStatus(getString(R.string.loading_library))
         rebuildBookmarkIndex()
         updateEmptyState()
         loadLibraryCatalog()
@@ -487,7 +514,7 @@ class MainActivity : Activity() {
     private fun loadLibraryCatalog() {
         val generation = ++catalogLoadGeneration
         catalogState = BookCatalogState.Loading
-        setStatus("Loading library…")
+        setStatus(getString(R.string.loading_library))
         updateNavigationControls()
         updateEmptyState()
         libraryStorage.loadCatalog { result ->
@@ -538,14 +565,16 @@ class MainActivity : Activity() {
         when {
             selectedBookIds.isNotEmpty() -> hydrateInitialTableIndexes()
             books.isEmpty() -> {
-                setStatus(if (newCatalog) "Library is ready" else "Library is empty")
+                setStatus(if (newCatalog) getString(R.string.library_ready) else getString(R.string.library_empty))
                 updateEmptyState()
-                mainHandler.post { if (!destroying && catalogReady()) showLibrary() }
             }
             else -> {
-                setStatus("Select a library item to start")
+                setStatus(getString(R.string.select_library_item))
                 updateEmptyState()
             }
+        }
+        if (restoreLibraryAfterLoad || books.isEmpty()) {
+            mainHandler.post { if (!destroying && catalogReady()) showLibrary() }
         }
     }
 
@@ -560,7 +589,7 @@ class MainActivity : Activity() {
             scheduleSelectedBookTextIndexes()
             return
         }
-        setStatus("Loading ${requests.size} table index${if (requests.size == 1) "" else "es"}…")
+        setStatus(quantityString(R.plurals.loading_table_indexes, requests.size))
         requests.forEach { snapshot ->
             val selectionVersion = tableSessionController.selectionVersion(snapshot.id)
             val contentToken = tableSessionController.captureContentOperation(snapshot.id)
@@ -585,11 +614,11 @@ class MainActivity : Activity() {
                         }
                     }
                     is BookIndexLoadResult.Missing -> {
-                        bookIndexLoadErrors[snapshot.id] = "Stored item index is missing"
-                        recoverActiveBookWithMissingIndex(current, "Stored item index is missing")
+                        bookIndexLoadErrors[snapshot.id] = getString(R.string.index_missing)
+                        recoverActiveBookWithMissingIndex(current, getString(R.string.index_missing))
                     }
                     is BookIndexLoadResult.Failed -> {
-                        val reason = "Stored item index could not be read: ${result.message}"
+                        val reason = getString(R.string.index_unreadable, result.message)
                         bookIndexLoadErrors[snapshot.id] = reason
                         recoverActiveBookWithMissingIndex(current, reason)
                     }
@@ -605,10 +634,10 @@ class MainActivity : Activity() {
         if (activeTabOrNull()?.bookId != book.id) return
         if (book.kind == LibraryItemKind.IMAGE_COLLECTION) {
             unavailableBookIds += book.id
-            unavailableBookErrors[book.id] = "$reason. Rescan its campaign folder."
+            unavailableBookErrors[book.id] = getString(R.string.rescan_after_error, reason)
             return
         }
-        setStatus("$reason · rebuilding ${book.title}…")
+        setStatus(getString(R.string.rebuilding_after_error, reason, book.title))
         activateCurrentTab(
             forceReload = true,
             forceMetadataRefresh = true,
@@ -622,9 +651,9 @@ class MainActivity : Activity() {
     private fun requireCatalogReady(): Boolean {
         if (catalogReady()) return true
         val message = when (val state = catalogState) {
-            BookCatalogState.Loading -> "Library is still loading"
-            is BookCatalogState.Failed -> "Library could not be loaded. Retry from the recovery panel."
-            else -> "Library is not ready"
+            BookCatalogState.Loading -> getString(R.string.library_still_loading)
+            is BookCatalogState.Failed -> getString(R.string.library_load_retry)
+            else -> getString(R.string.library_not_ready)
         }
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
         return false
@@ -637,7 +666,14 @@ class MainActivity : Activity() {
             append(": ${failure.message}")
         }
         setStatus(lastStorageDiagnostic)
-        showError("${failure.operation.label} failed", IllegalStateException(failure.message))
+        val title = when (failure.operation) {
+            BookStorageOperation.LOAD_CATALOG -> R.string.load_library_failed
+            BookStorageOperation.LOAD_INDEX -> R.string.load_item_index_failed
+            BookStorageOperation.SAVE_CATALOG -> R.string.save_library_failed
+            BookStorageOperation.SAVE_INDEX -> R.string.save_item_index_failed
+            BookStorageOperation.DELETE_INDEX -> R.string.delete_item_index_failed
+        }
+        showError(getString(title), IllegalStateException(failure.message))
     }
 
     override fun onResume() {
@@ -691,11 +727,13 @@ class MainActivity : Activity() {
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (::pageCache.isInitialized) pageCache.trimUnpinned()
+        libraryPreviewLoader?.trimMemory()
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
         if (::pageCache.isInitialized) pageCache.trimUnpinned()
+        libraryPreviewLoader?.trimMemory()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -704,6 +742,10 @@ class MainActivity : Activity() {
         outState.putInt(STATE_PAGE, currentPage)
         outState.putBoolean(STATE_SPREAD, spreadMode)
         outState.putBoolean(STATE_SPREAD_SKIP_COVER, spreadSkipCover)
+        outState.putBoolean(STATE_IMMERSIVE, immersive)
+        outState.putBoolean(STATE_LIBRARY_OPEN, libraryDialog?.isShowing == true || restoreLibraryAfterLoad)
+        outState.putString(STATE_LIBRARY_FILTER, libraryFilter.kind.name)
+        outState.putString(STATE_LIBRARY_TAG, libraryFilter.tagId)
         readerSessionRepository.saveTabsToInstanceState(outState, tabs, activeTabIndex)
         super.onSaveInstanceState(outState)
     }
@@ -867,7 +909,7 @@ class MainActivity : Activity() {
             setTextColor(uiPalette.textSecondary)
         }
         referenceSearchMoreButton = Button(this).apply {
-            text = "Show more"
+            text = getString(R.string.show_more)
             textSize = 13f
             isAllCaps = false
             minWidth = 0
@@ -880,7 +922,7 @@ class MainActivity : Activity() {
             elevation = 0f
             stateListAnimator = null
             visibility = View.GONE
-            contentDescription = "Load more full-text search results"
+            contentDescription = getString(R.string.more_text_results_description)
             setOnClickListener {
                 val session = textSearchSession ?: return@setOnClickListener
                 if (session.searchInFlight || session.results.size >= session.totalMatches) {
@@ -944,7 +986,7 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
         emptyHint = TextView(this).apply {
-            text = "Add a PDF, Markdown note, or campaign folder from ⋮"
+            text = getString(R.string.add_documents_hint)
             textSize = 18f
             setTextColor(uiPalette.textSecondary)
             gravity = Gravity.CENTER
@@ -961,15 +1003,15 @@ class MainActivity : Activity() {
             setOnClickListener { action() }
         }
         sourceRecoveryActions.addView(
-            recoveryButton("Retry") {
+            recoveryButton(getString(R.string.retry)) {
                 activeBook()?.let {
-                    setStatus("Retrying ${it.title}…")
+                    setStatus(getString(R.string.retrying_item, it.title))
                     activateCurrentTab(forceReload = true)
                 }
             },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)),
         )
-        sourceRelinkButton = recoveryButton("Relink") {
+        sourceRelinkButton = recoveryButton(getString(R.string.relink)) {
             activeBook()?.let { book ->
                 if (book.kind == LibraryItemKind.IMAGE_COLLECTION) {
                     rescanLibraryFolders()
@@ -985,7 +1027,7 @@ class MainActivity : Activity() {
             },
         )
         sourceRecoveryActions.addView(
-            recoveryButton("Library") { showLibrary() },
+            recoveryButton(getString(R.string.library)) { showLibrary() },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)).apply {
                 marginStart = dp(6)
             },
@@ -1002,11 +1044,11 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             visibility = View.GONE
             addView(
-                recoveryButton("Retry library") { loadLibraryCatalog() },
+                recoveryButton(getString(R.string.retry_library)) { loadLibraryCatalog() },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)),
             )
             addView(
-                recoveryButton("Diagnostics") { showDiagnostics() },
+                recoveryButton(getString(R.string.diagnostics)) { showDiagnostics() },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)).apply {
                     marginStart = dp(6)
                 },
@@ -1036,7 +1078,7 @@ class MainActivity : Activity() {
             minimumHeight = 0
             setPadding(0, 0, 0, 0)
             background = chromeButtonBackground(colorWithAlpha(uiPalette.surface, 0xe6))
-            contentDescription = "Reader menu"
+            contentDescription = getString(R.string.reader_menu_description)
             setOnClickListener { showReaderMenu() }
         }
         root.addView(
@@ -1096,8 +1138,8 @@ class MainActivity : Activity() {
             minimumWidth = 0
             minimumHeight = 0
             setPadding(0, 0, 0, 0)
-            contentDescription = "Search bookmarks and filenames. Hold for full-text search"
-            tooltipText = "Tap: Navigate · hold: Full text"
+            contentDescription = getString(R.string.search_button_description)
+            tooltipText = getString(R.string.search_button_tooltip)
             background = chromeButtonBackground(colorWithAlpha(uiPalette.surface, 0xe6))
             isEnabled = false
             setOnClickListener {
@@ -1161,17 +1203,18 @@ class MainActivity : Activity() {
         )
 
         referenceSearchEditButton = Button(this).apply {
-            text = "Edit"
+            text = getString(R.string.edit)
             textSize = 14f
             isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
+            setSingleLine(true)
+            minWidth = dp(REFERENCE_SEARCH_EDIT_WIDTH_DP)
+            minimumWidth = dp(REFERENCE_SEARCH_EDIT_WIDTH_DP)
             minHeight = 0
             minimumHeight = 0
-            setPadding(dp(10), 0, dp(10), 0)
             setTextColor(uiPalette.textPrimary)
             background = chromeButtonBackground(uiPalette.surfaceRaised)
-            contentDescription = "Edit full-text search"
+            setPadding(dp(10), 0, dp(10), 0)
+            contentDescription = getString(R.string.edit_search_description)
             visibility = View.GONE
             setOnClickListener {
                 searchMode = SearchMode.TEXT
@@ -1181,7 +1224,7 @@ class MainActivity : Activity() {
         referencePane.addView(
             referenceSearchEditButton,
             FrameLayout.LayoutParams(
-                dp(REFERENCE_SEARCH_EDIT_WIDTH_DP),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
                 dp(CHROME_TOUCH_SIZE_DP),
                 Gravity.TOP or Gravity.START,
             ).apply {
@@ -1222,7 +1265,7 @@ class MainActivity : Activity() {
             textSize = 20f
             gravity = Gravity.CENTER
             setTextColor(uiPalette.textSecondary)
-            contentDescription = "Close reference"
+            contentDescription = getString(R.string.close_reference)
             setOnClickListener { closeReference() }
         }
         referenceIndicatorContainer = object : LinearLayout(this) {
@@ -1230,8 +1273,10 @@ class MainActivity : Activity() {
                 val availableWidth = MeasureSpec.getSize(widthMeasureSpec)
                 val tall = resolvedReaderLayout() == ReaderLayoutMode.TALL
                 val leadingClearance = when {
-                    textSearchSession != null && tall -> dp(136)
-                    textSearchSession != null -> dp(80)
+                    textSearchSession != null -> {
+                        val editParams = referenceSearchEditButton.layoutParams as FrameLayout.LayoutParams
+                        editParams.marginStart + referenceSearchEditButton.measuredWidth + dp(8)
+                    }
                     tall -> dp(64)
                     else -> 0
                 }
@@ -1647,7 +1692,7 @@ class MainActivity : Activity() {
 
     private fun persistReadPermission(uri: Uri, resultFlags: Int) {
         val readFlag = resultFlags and Intent.FLAG_GRANT_READ_URI_PERMISSION
-        require(readFlag != 0) { "The document provider did not grant read access" }
+        require(readFlag != 0) { getString(R.string.read_access_not_granted) }
         contentResolver.takePersistableUriPermission(uri, readFlag)
     }
 
@@ -1656,12 +1701,12 @@ class MainActivity : Activity() {
         try {
             persistReadPermission(uri, resultFlags)
         } catch (t: Throwable) {
-            showError("Could not keep access to folder", t)
+            showError(getString(R.string.folder_access_failed), t)
             return
         }
-        setStatus("Reading folder information…")
+        setStatus(getString(R.string.reading_folder_information))
         submitMaintenanceWork {
-            val label = documentMetadataReader.displayName(uri) ?: "Library folder"
+            val label = documentMetadataReader.displayName(uri) ?: getString(R.string.library_folder_fallback)
             mainHandler.post {
                 if (isDestroyed || destroying || !catalogReady()) return@post
                 val folder = LibraryFolderRecord(uri = uri.toString(), label = label)
@@ -1679,7 +1724,7 @@ class MainActivity : Activity() {
 
     private fun rescanLibraryFolders() {
         if (libraryFolders.isEmpty()) {
-            Toast.makeText(this, "No library folders have been added yet", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.no_library_folders), Toast.LENGTH_SHORT).show()
             return
         }
         scanLibraryFolders(libraryFolders.toList())
@@ -1687,12 +1732,12 @@ class MainActivity : Activity() {
 
     private fun scanLibraryFolders(folders: List<LibraryFolderRecord>) {
         if (folderScanInProgress) {
-            Toast.makeText(this, "A folder scan is already running", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.folder_scan_already_running), Toast.LENGTH_SHORT).show()
             return
         }
         folderScanInProgress = true
         refreshLibraryUi()
-        setStatus("Scanning ${folders.size} library folder${if (folders.size == 1) "" else "s"}…")
+        setStatus(quantityString(R.plurals.scanning_folders, folders.size))
         val knownBooks = books.toList()
         val contentSnapshots = knownBooks.associate { book ->
             book.id to tableSessionController.captureContentOperation(book.id)
@@ -1732,7 +1777,7 @@ class MainActivity : Activity() {
                             "queue ${startedAt - queuedAt} ms · " +
                             "work ${failedAt - startedAt} ms · ${t.message ?: t.javaClass.simpleName}"
                         refreshLibraryUi()
-                        showError("Folder scan failed", t)
+                        showError(getString(R.string.folder_scan_failed), t)
                     }
                 }
             }
@@ -1749,7 +1794,7 @@ class MainActivity : Activity() {
         val documents = folders.flatMap { folder ->
             runCatching { listFolderDocuments(folder) }
                 .getOrElse {
-                    failures += "${folder.label}: ${it.message ?: it.javaClass.simpleName}"
+                    failures += "${folder.label}: ${errorDescription(it)}"
                     emptyList()
                 }
         }
@@ -1793,7 +1838,7 @@ class MainActivity : Activity() {
                 it.kind == LibraryItemKind.PDF && it.uri == pdfDocument.uri.toString()
             }
             if (exactMatches.size > 1) {
-                skipped += "${pdfDocument.fileName}: duplicate stored URI"
+                skipped += getString(R.string.duplicate_pdf_uri, pdfDocument.fileName)
                 continue
             }
             var existing = exactMatches.singleOrNull()
@@ -1806,7 +1851,7 @@ class MainActivity : Activity() {
                     when {
                         filenameMatches.size == 1 -> existing = filenameMatches.single()
                         filenameMatches.size > 1 -> {
-                            skipped += "${pdfDocument.fileName}: matches multiple known books"
+                            skipped += getString(R.string.ambiguous_known_pdf, pdfDocument.fileName)
                             continue
                         }
                     }
@@ -1816,7 +1861,7 @@ class MainActivity : Activity() {
             val matchingTexts = textByFolderAndStem[folderStemKey(pdfDocument)].orEmpty()
             val tocDocument = matchingTexts.singleOrNull()
             if (matchingTexts.size > 1) {
-                skipped += "${pdfDocument.fileName}: multiple matching TXT files; PDF was still imported"
+                skipped += getString(R.string.ambiguous_matching_toc, pdfDocument.fileName)
             }
 
             try {
@@ -1835,7 +1880,7 @@ class MainActivity : Activity() {
                 existing?.let { old -> workingBooks.removeAll { it.id == old.id } }
                 workingBooks += change.book
             } catch (t: Throwable) {
-                failures += "${pdfDocument.fileName}: ${t.message ?: t.javaClass.simpleName}"
+                failures += "${pdfDocument.fileName}: ${errorDescription(t)}"
             }
         }
 
@@ -1844,7 +1889,7 @@ class MainActivity : Activity() {
                 it.kind == LibraryItemKind.MARKDOWN && it.uri == markdownDocument.uri.toString()
             }
             if (exactMatches.size > 1) {
-                skipped += "${markdownDocument.fileName}: duplicate stored note URI"
+                skipped += getString(R.string.duplicate_note_uri, markdownDocument.fileName)
                 continue
             }
             var existing = exactMatches.singleOrNull()
@@ -1856,7 +1901,7 @@ class MainActivity : Activity() {
                 when {
                     filenameMatches.size == 1 -> existing = filenameMatches.single()
                     filenameMatches.size > 1 -> {
-                        skipped += "${markdownDocument.fileName}: matches multiple known notes"
+                        skipped += getString(R.string.ambiguous_known_note, markdownDocument.fileName)
                         continue
                     }
                 }
@@ -1871,7 +1916,7 @@ class MainActivity : Activity() {
                 existing?.let { old -> workingBooks.removeAll { it.id == old.id } }
                 workingBooks += change.book
             } catch (t: Throwable) {
-                failures += "${markdownDocument.fileName}: ${t.message ?: t.javaClass.simpleName}"
+                failures += "${markdownDocument.fileName}: ${errorDescription(t)}"
             }
         }
 
@@ -1883,7 +1928,7 @@ class MainActivity : Activity() {
                 it.kind == LibraryItemKind.IMAGE_COLLECTION && it.uri == first.parentUri
             }
             if (exactMatches.size > 1) {
-                skipped += "${first.parentName}: duplicate stored album URI"
+                skipped += getString(R.string.duplicate_album_uri, first.parentName)
                 continue
             }
             val existing = exactMatches.singleOrNull()
@@ -1898,7 +1943,7 @@ class MainActivity : Activity() {
                 workingBooks += change.book
             } catch (t: Throwable) {
                 failures += "${first.relativeDirectory.ifBlank { first.parentName }}: " +
-                    (t.message ?: t.javaClass.simpleName)
+                    errorDescription(t)
             }
         }
 
@@ -2057,7 +2102,7 @@ class MainActivity : Activity() {
             val matchingToc = tocDocument
             try {
                 val text = contentResolver.openInputStream(matchingToc.uri).use { input ->
-                    requireNotNull(input) { "Could not open ${matchingToc.fileName}" }
+                    requireNotNull(input) { getString(R.string.cannot_open_toc, matchingToc.fileName) }
                     input.bufferedReader(Charsets.UTF_8).use { it.readText() }
                 }
                 val fingerprint = textFingerprint(text)
@@ -2068,7 +2113,7 @@ class MainActivity : Activity() {
                 if (tocChanged) {
                     val parsed = ExternalTocParser.parse(text, updated.pageCount, updated.id)
                     require(parsed.entries.isNotEmpty() || parsed.rejectedLines == 0) {
-                        "${matchingToc.fileName} contained no valid TOC entries"
+                        getString(R.string.toc_has_no_entries, matchingToc.fileName)
                     }
                     updated = updated.copy(
                         externalBookmarks = parsed.entries,
@@ -2090,7 +2135,7 @@ class MainActivity : Activity() {
                     )
                 }
             } catch (t: Throwable) {
-                failures += "${matchingToc.fileName}: ${t.message ?: t.javaClass.simpleName}"
+                failures += "${matchingToc.fileName}: ${errorDescription(t)}"
             }
         }
 
@@ -2120,7 +2165,7 @@ class MainActivity : Activity() {
         documents: List<FolderDocument>,
         newBookColor: () -> Int,
     ): FolderBookChange? {
-        require(documents.isNotEmpty()) { "Image album has no images" }
+        require(documents.isNotEmpty()) { getString(R.string.empty_image_album) }
         val first = documents.first()
         val images = documents
             .sortedWith { left, right -> naturalCompare(left.fileName, right.fileName) }
@@ -2213,10 +2258,10 @@ class MainActivity : Activity() {
         while (queue.isNotEmpty()) {
             val parent = queue.removeFirst()
             if (!visited.add(parent.documentId)) continue
-            require(visited.size <= 5_000) { "Folder tree contains too many directories" }
+            require(visited.size <= 5_000) { getString(R.string.too_many_directories) }
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parent.documentId)
             val cursor = requireNotNull(contentResolver.query(childrenUri, projection, null, null, null)) {
-                "Could not list ${parent.relativePath.ifBlank { folder.label }}"
+                getString(R.string.cannot_list_folder, parent.relativePath.ifBlank { folder.label })
             }
             cursor.use { rows ->
                 val idColumn = rows.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
@@ -2248,7 +2293,7 @@ class MainActivity : Activity() {
                             lastModified = modifiedColumn.takeIf { column -> column >= 0 && !rows.isNull(column) }
                                 ?.let(rows::getLong)?.takeIf { value -> value > 0L },
                         )
-                    require(result.size <= 20_000) { "Folder tree contains too many files" }
+                    require(result.size <= 20_000) { getString(R.string.too_many_files) }
                 }
             }
         }
@@ -2362,7 +2407,7 @@ class MainActivity : Activity() {
         }
 
         if (tabs.isEmpty()) {
-            addedChanges.firstOrNull()?.book?.let { tabs += ReaderTab(it.id, 0, "Start") }
+            addedChanges.firstOrNull()?.book?.let { tabs += ReaderTab.start(it.id) }
         }
         appliedChanges.forEach { change ->
             val pageCount = change.book.pageCount
@@ -2371,7 +2416,7 @@ class MainActivity : Activity() {
                 val destination = tab.anchorKey?.let(destinations::get)
                 tab.pageIndex = destination?.pageIndex ?: tab.pageIndex.coerceIn(0, pageCount - 1)
                 if (destination != null) {
-                    tab.label = destination.title
+                    tab.setTextTitle(destination.title)
                     tab.originPageIndex = destination.pageIndex
                 } else {
                     tab.originPageIndex = tab.originPageIndex.coerceIn(0, pageCount - 1)
@@ -2468,16 +2513,16 @@ class MainActivity : Activity() {
         }
         val rejectedLines = appliedChanges.sumOf { it.rejectedTocLines }
         val summary = buildString {
-            append("${result.folderCount} folder${if (result.folderCount == 1) "" else "s"} scanned")
-            append(" · ${result.discoveredPdfCount} PDF${if (result.discoveredPdfCount == 1) "" else "s"} found")
-            append(" · ${result.discoveredMarkdownCount} note${if (result.discoveredMarkdownCount == 1) "" else "s"}")
-            append(" · ${result.discoveredAlbumCount} album${if (result.discoveredAlbumCount == 1) "" else "s"}")
-            append(" (${result.discoveredImageCount} images)")
-            append("\n$added added · $refreshed refreshed · $unchanged unchanged")
-            append("\n$tocImported matching TOC${if (tocImported == 1) "" else "s"} imported")
-            if (rejectedLines > 0) append(" · $rejectedLines invalid line${if (rejectedLines == 1) "" else "s"} ignored")
-            if (result.skipped.isNotEmpty()) append("\n${result.skipped.size} warning${if (result.skipped.size == 1) "" else "s"}")
-            if (result.failures.isNotEmpty()) append(" · ${result.failures.size} failure${if (result.failures.size == 1) "" else "s"}")
+            append(quantityString(R.plurals.folders_scanned, result.folderCount))
+            append(quantityString(R.plurals.pdfs_found, result.discoveredPdfCount))
+            append(quantityString(R.plurals.notes_found, result.discoveredMarkdownCount))
+            append(quantityString(R.plurals.albums_found, result.discoveredAlbumCount))
+            append(quantityString(R.plurals.album_images_found, result.discoveredImageCount))
+            append(getString(R.string.scan_change_summary, added, refreshed, unchanged))
+            append(quantityString(R.plurals.matching_tocs_imported, tocImported))
+            if (rejectedLines > 0) append(quantityString(R.plurals.invalid_lines_ignored, rejectedLines))
+            if (result.skipped.isNotEmpty()) append(quantityString(R.plurals.scan_warnings, result.skipped.size))
+            if (result.failures.isNotEmpty()) append(quantityString(R.plurals.scan_failures, result.failures.size))
         }
         setStatus(summary.replace('\n', ' '))
         val details = result.skipped + result.failures
@@ -2485,9 +2530,9 @@ class MainActivity : Activity() {
             Toast.makeText(this, summary.replace('\n', ' '), Toast.LENGTH_LONG).show()
         } else {
             AlertDialog.Builder(this)
-                .setTitle("Folder scan complete")
+                .setTitle(getString(R.string.folder_scan_complete))
                 .setMessage(summary + "\n\n" + details.take(12).joinToString("\n") { "• $it" })
-                .setPositiveButton("Close", null)
+                .setPositiveButton(getString(R.string.close), null)
                 .show()
         }
     }
@@ -2502,7 +2547,7 @@ class MainActivity : Activity() {
 
     private fun addLibraryDocument(uri: Uri, resultFlags: Int) {
         if (!requireCatalogReady()) return
-        setStatus("Reading document information…")
+        setStatus(getString(R.string.reading_document_information))
         submitMaintenanceWork {
             val metadata = documentMetadataReader.query(uri)
             val mimeType = contentResolver.getType(uri).orEmpty()
@@ -2515,8 +2560,8 @@ class MainActivity : Activity() {
                         mimeType.equals("application/pdf", true) ->
                         addPdf(uri, resultFlags, metadata)
                     else -> showError(
-                        "Unsupported file",
-                        IllegalArgumentException("Choose a PDF, .md, or .markdown file"),
+                        getString(R.string.unsupported_file),
+                        IllegalArgumentException(getString(R.string.choose_supported_document)),
                     )
                 }
             }
@@ -2530,7 +2575,7 @@ class MainActivity : Activity() {
         try {
             persistReadPermission(uri, resultFlags)
         } catch (t: Throwable) {
-            showError("Could not keep access to PDF", t)
+            showError(getString(R.string.pdf_access_failed), t)
             return
         }
         if (existing >= 0) {
@@ -2546,14 +2591,14 @@ class MainActivity : Activity() {
             return
         }
 
-        val fileName = metadata.fileName ?: "Selected PDF"
+        val fileName = metadata.fileName ?: getString(R.string.selected_pdf_fallback)
         val matches = books.filter {
             it.kind == LibraryItemKind.PDF && it.fileName.equals(fileName, ignoreCase = true)
         }
         if (matches.isNotEmpty()) {
-            val choices = matches.map { "Use ${it.title} and keep its history" } + "Create a separate book"
+            val choices = matches.map { getString(R.string.keep_known_history, it.title) } + getString(R.string.create_separate_book)
             AlertDialog.Builder(this)
-                .setTitle("$fileName is already known")
+                .setTitle(getString(R.string.already_known_file, fileName))
                 .setItems(choices.toTypedArray()) { _, which ->
                     if (which < matches.size) {
                         updateKnownBookSource(
@@ -2585,14 +2630,14 @@ class MainActivity : Activity() {
         try {
             persistReadPermission(uri, resultFlags)
         } catch (t: Throwable) {
-            showError("Could not keep access to note", t)
+            showError(getString(R.string.note_access_failed), t)
             return
         }
         if (existing != null) {
             unavailableBookIds.remove(existing.id)
             unavailableBookErrors.remove(existing.id)
             selectBook(existing.id, openAfter = true)
-            Toast.makeText(this, "Known note selected", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.known_note_selected), Toast.LENGTH_SHORT).show()
             return
         }
         createMarkdownBook(uri, metadata)
@@ -2601,10 +2646,10 @@ class MainActivity : Activity() {
     private fun createMarkdownBook(uri: Uri, metadata: DocumentMetadata) {
         val id = UUID.randomUUID().toString()
         val contentToken = tableSessionController.beginContentOperation(id)
-        val fileName = metadata.fileName ?: "Selected note.md"
+        val fileName = metadata.fileName ?: getString(R.string.selected_note_fallback)
         val title = cleanBookName(fileName)
         val color = nextBookColor()
-        setStatus("Adding $title…")
+        setStatus(getString(R.string.adding_item, title))
         submitMaintenanceWork {
             var opened: PdfDocument? = null
             try {
@@ -2642,20 +2687,20 @@ class MainActivity : Activity() {
                     persistBooks()
                     rebuildBookmarkIndex()
                     refreshLibraryUi()
-                    tabs += ReaderTab(record.id, 0, "Start")
+                    tabs += ReaderTab.start(record.id)
                     activeTabIndex = tabs.lastIndex
                     currentPage = 0
                     persistSession()
                     scheduleBookTextIndex(record)
                     refreshTextSearchScope()
                     activateCurrentTab()
-                    Toast.makeText(this, "$title added to the library and table", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.added_to_library_table, title), Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
                 runCatching {
                     contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                showError("Add note failed", t)
+                showError(getString(R.string.add_note_failed), t)
             } finally {
                 opened?.close()
             }
@@ -2665,10 +2710,10 @@ class MainActivity : Activity() {
     private fun createLibraryBook(uri: Uri, metadata: DocumentMetadata) {
         val id = UUID.randomUUID().toString()
         val contentToken = tableSessionController.beginContentOperation(id)
-        val fileName = metadata.fileName ?: "Selected PDF"
+        val fileName = metadata.fileName ?: getString(R.string.selected_pdf_fallback)
         val title = cleanBookName(fileName)
         val color = nextBookColor()
-        setStatus("Adding $title…")
+        setStatus(getString(R.string.adding_item, title))
 
         submitMaintenanceWork {
             var opened: PdfDocument? = null
@@ -2704,18 +2749,18 @@ class MainActivity : Activity() {
                     persistBooks()
                     rebuildBookmarkIndex()
                     refreshLibraryUi()
-                    tabs += ReaderTab(record.id, 0, "Start")
+                    tabs += ReaderTab.start(record.id)
                     activeTabIndex = tabs.lastIndex
                     currentPage = 0
                     persistSession()
                     scheduleBookTextIndex(record)
                     refreshTextSearchScope()
                     activateCurrentTab()
-                    Toast.makeText(this, "$title added to the library and table", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.added_to_library_table, title), Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
                 runCatching { contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-                showError("Add PDF failed", t)
+                showError(getString(R.string.add_pdf_failed), t)
             } finally {
                 opened?.close()
             }
@@ -2726,10 +2771,10 @@ class MainActivity : Activity() {
         val bookId = pendingRelinkBookId.also { pendingRelinkBookId = null } ?: return
         if (bookById(bookId) == null) return
         if (books.any { it.id != bookId && it.uri == uri.toString() }) {
-            showError("Relink failed", IllegalArgumentException("That source is already used by another library item"))
+            showError(getString(R.string.relink_failed), IllegalArgumentException(getString(R.string.source_already_used)))
             return
         }
-        setStatus("Reading replacement source…")
+        setStatus(getString(R.string.reading_replacement_source))
         submitMaintenanceWork {
             val metadata = documentMetadataReader.query(uri)
             val mimeType = contentResolver.getType(uri)
@@ -2738,8 +2783,8 @@ class MainActivity : Activity() {
                 val old = bookById(bookId) ?: return@finish
                 if (books.any { it.id != bookId && it.uri == uri.toString() }) {
                     showError(
-                        "Relink failed",
-                        IllegalArgumentException("That source is already used by another library item"),
+                        getString(R.string.relink_failed),
+                        IllegalArgumentException(getString(R.string.source_already_used)),
                     )
                     return@finish
                 }
@@ -2747,13 +2792,13 @@ class MainActivity : Activity() {
                     old.kind == LibraryItemKind.MARKDOWN &&
                     !isMarkdownFile(metadata.fileName.orEmpty(), mimeType)
                 ) {
-                    showError("Relink failed", IllegalArgumentException("Choose a .md or .markdown file"))
+                    showError(getString(R.string.relink_failed), IllegalArgumentException(getString(R.string.choose_markdown)))
                     return@finish
                 }
                 try {
                     persistReadPermission(uri, resultFlags)
                 } catch (t: Throwable) {
-                    showError("Could not keep access to source", t)
+                    showError(getString(R.string.source_access_failed), t)
                     return@finish
                 }
                 if (old.kind == LibraryItemKind.PDF) {
@@ -2780,7 +2825,7 @@ class MainActivity : Activity() {
         require(old.kind == LibraryItemKind.MARKDOWN)
         val snapshot = bookById(old.id) ?: return
         val contentToken = tableSessionController.beginContentOperation(old.id)
-        setStatus("Relinking ${snapshot.title}…")
+        setStatus(getString(R.string.relinking_item, snapshot.title))
         loadIndexForContentOperation(snapshot, contentToken) { hydrated ->
             submitMaintenanceWork {
             var document: PdfDocument? = null
@@ -2839,7 +2884,7 @@ class MainActivity : Activity() {
                             ?: tab.pageIndex.coerceIn(0, accepted.pageCount - 1)
                         tab.originPageIndex = destination?.pageIndex
                             ?: tab.originPageIndex.coerceIn(0, accepted.pageCount - 1)
-                        if (destination != null) tab.label = destination.title
+                        if (destination != null) tab.setTextTitle(destination.title)
                     }
                     referenceLocation?.takeIf { it.bookId == snapshot.id }?.let { reference ->
                         val destination = reference.anchorKey?.let(destinations::get)
@@ -2865,12 +2910,12 @@ class MainActivity : Activity() {
                     } else if (referenceLocation?.bookId == snapshot.id) {
                         renderReference()
                     }
-                    Toast.makeText(this, "${accepted.title} relinked", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.item_relinked, accepted.title), Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
                 if (tableSessionController.isContentOperationCurrent(contentToken)) {
                     if (uri.toString() != snapshot.uri) releaseExactPersistedPermission(uri.toString())
-                    showError("Note relink failed", t)
+                    showError(getString(R.string.note_relink_failed), t)
                 }
             } finally {
                 document?.close()
@@ -2894,7 +2939,7 @@ class MainActivity : Activity() {
             snapshot = bookById(bookId) ?: return
         }
         val contentToken = tableSessionController.beginContentOperation(bookId)
-        setStatus("Updating ${snapshot.title}…")
+        setStatus(getString(R.string.updating_item, snapshot.title))
         loadIndexForContentOperation(snapshot, contentToken) { hydratedOld ->
             submitMaintenanceWork work@{
             var opened: PdfDocument? = null
@@ -3003,14 +3048,14 @@ class MainActivity : Activity() {
                     }
                     if (reloadReference) renderReference()
                     persistSession()
-                    Toast.makeText(this, "${accepted.title} updated", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.item_updated, accepted.title), Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
                 if (tableSessionController.isContentOperationCurrent(contentToken)) {
                     if (uri.toString() != snapshot.uri) runCatching {
                         contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
-                    showError("PDF update failed", t)
+                    showError(getString(R.string.pdf_update_failed), t)
                     mainHandler.post {
                         if (!isDestroyed && activeTabOrNull()?.bookId == bookId) {
                             activateCurrentTab(forceReload = true)
@@ -3030,15 +3075,15 @@ class MainActivity : Activity() {
         val book = bookById(bookId) ?: return
         val contentToken = tableSessionController.beginContentOperation(bookId)
         val sourceAccessPersisted = runCatching { persistReadPermission(uri, resultFlags) }.isSuccess
-        setStatus("Importing bookmarks…")
+        setStatus(getString(R.string.importing_bookmarks))
 
         loadIndexForContentOperation(book, contentToken, requireLoadedIndex = true) { hydrated ->
             submitMaintenanceWork {
             try {
                 val metadata = documentMetadataReader.query(uri)
-                val name = metadata.fileName ?: "bookmark file"
+                val name = metadata.fileName ?: getString(R.string.bookmark_file_fallback)
                 val text = contentResolver.openInputStream(uri).use { input ->
-                    requireNotNull(input) { "Could not open bookmark file" }
+                    requireNotNull(input) { getString(R.string.cannot_open_bookmark_file) }
                     input.bufferedReader(Charsets.UTF_8).use { it.readText() }
                 }
                 val parsed = ExternalTocParser.parse(text, hydrated.pageCount, hydrated.id)
@@ -3070,13 +3115,13 @@ class MainActivity : Activity() {
                     rebuildBookmarkIndex()
                     renderTabBar()
                     resumeActiveDocumentAfterIndexChange(bookId)
-                    val rejected = if (parsed.rejectedLines > 0) " · ${parsed.rejectedLines} rejected" else ""
-                    Toast.makeText(this, "Imported ${parsed.entries.size} bookmarks$rejected", Toast.LENGTH_LONG).show()
-                    setStatus("Bookmark index: ${bookmarkIndex.size} entries")
+                    val rejected = if (parsed.rejectedLines > 0) quantityString(R.plurals.rejected_entries_suffix, parsed.rejectedLines) else ""
+                    Toast.makeText(this, quantityString(R.plurals.bookmarks_imported, parsed.entries.size) + rejected, Toast.LENGTH_LONG).show()
+                    setStatus(quantityString(R.plurals.bookmark_index_entries, bookmarkIndex.size))
                 }
             } catch (t: Throwable) {
                 if (tableSessionController.isContentOperationCurrent(contentToken)) {
-                    showError("TOC import failed", t)
+                    showError(getString(R.string.toc_import_failed), t)
                 }
             }
             }
@@ -3103,7 +3148,7 @@ class MainActivity : Activity() {
 
     private fun openDocument(uri: Uri): PdfDocument {
         val descriptor = requireNotNull(contentResolver.openFileDescriptor(uri, "r")) {
-            "Could not open PDF"
+            getString(R.string.cannot_open_pdf)
         }
         return MuPdfDocument(descriptor)
     }
@@ -3165,7 +3210,7 @@ class MainActivity : Activity() {
             pageCache.removeBook(book.id)
         }
         updateEmptyState()
-        setStatus("Opening ${book.title}…")
+        setStatus(getString(R.string.opening_item, book.title))
         submitRenderWork {
             if (
                 request != primaryOpenGeneration || destroying ||
@@ -3279,7 +3324,7 @@ class MainActivity : Activity() {
                                         ?: refreshedTab.pageIndex.coerceIn(0, liveDocument.pageCount - 1)
                                     refreshedTab.originPageIndex = destination?.pageIndex
                                         ?: refreshedTab.originPageIndex.coerceIn(0, liveDocument.pageCount - 1)
-                                    if (destination != null) refreshedTab.label = destination.title
+                                    if (destination != null) refreshedTab.setTextTitle(destination.title)
                                 }
                                 referenceLocation?.takeIf { it.bookId == book.id }?.let { refreshedReference ->
                                     val destination = destinations[refreshedReference.anchorKey]
@@ -3330,7 +3375,7 @@ class MainActivity : Activity() {
                     updatePageIndicator()
                     updateEmptyState()
                     refreshLibraryUi()
-                    setStatus("Could not open ${book.title}: ${sourceUnavailableReason(t)}")
+                    setStatus(getString(R.string.cannot_open_item, book.title, sourceUnavailableReason(t)))
                 }
             } finally {
                 opened?.close()
@@ -3357,7 +3402,7 @@ class MainActivity : Activity() {
                             current.sourceFingerprint == expectedFingerprint &&
                             current.sourceRevisionKey() == expectedRevision
                         ) {
-                            setStatus("${book.title} changed · refreshing…")
+                            setStatus(getString(R.string.source_changed_refreshing, book.title))
                             activateCurrentTab(
                                 forceReload = true,
                                 forceMetadataRefresh = true,
@@ -3383,7 +3428,7 @@ class MainActivity : Activity() {
                     !isDestroyed && activeTabOrNull()?.bookId == book.id &&
                     activeBook()?.sourceRevisionKey() == expectedRevision
                 ) {
-                    setStatus("${book.title} changed · refreshing…")
+                    setStatus(getString(R.string.source_changed_refreshing, book.title))
                     activateCurrentTab(
                         forceReload = true,
                         forceMetadataRefresh = true,
@@ -3408,17 +3453,18 @@ class MainActivity : Activity() {
     }
 
     private fun sourceUnavailableReason(throwable: Throwable): String {
+        if (throwable is DocumentReadException) return errorDescription(throwable)
         val detail = throwable.message
             ?.lineSequence()
             ?.firstOrNull()
             ?.trim()
             .orEmpty()
         return when {
-            throwable is SecurityException -> "Read permission is no longer available"
+            throwable is SecurityException -> getString(R.string.read_permission_lost)
             detail.contains("ENOENT", ignoreCase = true) ||
-                detail.contains("not found", ignoreCase = true) -> "The file or folder could not be found"
+                detail.contains("not found", ignoreCase = true) -> getString(R.string.source_not_found)
             detail.isNotEmpty() -> detail.take(180)
-            else -> "The source could not be opened"
+            else -> getString(R.string.cannot_open_source)
         }
     }
 
@@ -3480,20 +3526,20 @@ class MainActivity : Activity() {
         val loadedActiveBook = !catalogUnavailable && active != null && pdf != null && pdfBookId == active.id
         val sourceUnavailable = active != null && active.id in unavailableBookIds
         emptyHint.text = when {
-            catalogState is BookCatalogState.Loading -> "Loading library…"
+            catalogState is BookCatalogState.Loading -> getString(R.string.loading_library)
             catalogFailure != null -> buildString {
-                append("Library could not be loaded")
+                append(getString(R.string.library_load_failed))
                 append("\n${catalogFailure.message}")
-                append("\nThe existing catalog was left unchanged.")
+                append(getString(R.string.catalog_unchanged))
             }
-            books.isEmpty() -> "Add a PDF, Markdown note, or campaign folder from ⋮"
-            selectedBookIds.isEmpty() -> "Select items from Library"
-            active == null -> "Choose a library item from ⋮"
+            books.isEmpty() -> getString(R.string.add_documents_hint)
+            selectedBookIds.isEmpty() -> getString(R.string.select_items_from_library)
+            active == null -> getString(R.string.choose_library_item_menu)
             sourceUnavailable -> buildString {
-                append("${active.fileName} is unavailable")
+                append(getString(R.string.item_unavailable, active.fileName))
                 unavailableBookErrors[active.id]?.let { append("\n$it") }
             }
-            else -> "Opening ${active.title}…"
+            else -> getString(R.string.opening_item, active.title)
         }
         emptyHint.setTextColor(
             if (sourceUnavailable || catalogFailure != null) uiPalette.error else uiPalette.textSecondary,
@@ -3503,9 +3549,9 @@ class MainActivity : Activity() {
         catalogRecoveryActions.visibility =
             if (catalogFailure != null) View.VISIBLE else View.GONE
         sourceRelinkButton.text = if (active?.kind == LibraryItemKind.IMAGE_COLLECTION) {
-            "Rescan"
+            getString(R.string.rescan)
         } else {
-            "Relink"
+            getString(R.string.relink)
         }
         emptyStateContainer.visibility = if (loadedActiveBook) View.GONE else View.VISIBLE
         pageIndicator.visibility = if (
@@ -3537,17 +3583,17 @@ class MainActivity : Activity() {
             setText((initialPage + 1).toString())
         }
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Go to page")
+            .setTitle(getString(R.string.go_to_page))
             .setView(input)
-            .setPositiveButton("Go") { _, _ ->
+            .setPositiveButton(getString(R.string.go)) { _, _ ->
                 val requested = input.text.toString().toIntOrNull()
                 if (requested == null || requested !in 1..pageCount) {
-                    Toast.makeText(this, "Page must be 1–$pageCount", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.page_range_error, pageCount), Toast.LENGTH_SHORT).show()
                 } else {
                     onJump(requested - 1)
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .create()
         dialog.setOnShowListener {
             input.requestFocus()
@@ -3775,7 +3821,7 @@ class MainActivity : Activity() {
     }
 
     private fun resolvePdfLinkLabel(book: BookRecord, link: PdfLinkInfo) {
-        setStatus("Reading link label…")
+        setStatus(getString(R.string.reading_link_label))
         val usePrimaryDocument = pdfBookId == book.id && pdf != null
         val work = {
             val sourceText = try {
@@ -3837,12 +3883,11 @@ class MainActivity : Activity() {
                 ?.let { "$bookId|link:$targetPage:${it.roundToInt()}" }
             ?: "$bookId|link:$targetPage"
         val anchorKey = exactBookmark?.identityKey ?: destinationAnchorKey
-        val physicalPageLabel = "Page ${targetPage + 1}"
-        val label = when {
-            exactBookmark != null -> exactBookmark.title
-            nearestBookmark != null -> "${nearestBookmark.title} · p${targetPage + 1}"
-            sourceLabel != null -> "$sourceLabel · p${targetPage + 1}"
-            else -> physicalPageLabel
+        val title = when {
+            exactBookmark != null -> TabTitle(exactBookmark.title)
+            nearestBookmark != null -> TabTitle(nearestBookmark.title, TabLabelKind.TEXT_WITH_PAGE, targetPage)
+            sourceLabel != null -> TabTitle(sourceLabel, TabLabelKind.TEXT_WITH_PAGE, targetPage)
+            else -> TabTitle(kind = TabLabelKind.PAGE, pageIndex = targetPage)
         }
 
         var existing = tabs.indexOfFirst { it.anchorKey == anchorKey }
@@ -3853,8 +3898,8 @@ class MainActivity : Activity() {
         }
         if (existing >= 0) {
             val existingTab = tabs[existing]
-            if (existingTab.label.startsWith("Page ") && label != physicalPageLabel) {
-                existingTab.label = label
+            if (existingTab.labelKind == TabLabelKind.PAGE && title.kind != TabLabelKind.PAGE) {
+                existingTab.setTitle(title)
                 existingTab.anchorKey = anchorKey
                 persistSession()
             }
@@ -3862,7 +3907,7 @@ class MainActivity : Activity() {
             return
         }
 
-        tabs += ReaderTab(bookId, targetPage, label, anchorKey)
+        tabs += ReaderTab(bookId, targetPage, "", anchorKey).apply { setTitle(title) }
         activeTabIndex = tabs.lastIndex
         currentPage = targetPage
         persistSession()
@@ -3902,7 +3947,7 @@ class MainActivity : Activity() {
             else primaryMarkdownStates[tab]?.requestNavigation()
             tab.bookId = entry.bookId
             tab.pageIndex = clamped
-            tab.label = entry.title
+            tab.setTextTitle(entry.title)
             tab.anchorKey = entry.identityKey
             tab.originPageIndex = clamped
         }
@@ -4046,7 +4091,7 @@ class MainActivity : Activity() {
             val title = listOfNotNull(
                 book?.title?.takeIf(String::isNotBlank),
                 reference.label.takeIf { it.isNotBlank() && it != book?.title },
-            ).joinToString(" · ").ifBlank { "Reference" }
+            ).joinToString(" · ").ifBlank { getString(R.string.reference) }
             val pageCount = book?.pageCount ?: 0
             val isMarkdown = book?.kind == LibraryItemKind.MARKDOWN
 
@@ -4055,7 +4100,7 @@ class MainActivity : Activity() {
             referencePageIndicator.visibility = if (isMarkdown) View.GONE else View.VISIBLE
             referencePageIndicator.isClickable = !isMarkdown
             referencePageIndicator.contentDescription = if (isMarkdown) null else {
-                "Go to reference page. Current page ${reference.pageIndex + 1} of $pageCount"
+                getString(R.string.reference_page_jump_description, reference.pageIndex + 1, pageCount)
             }
             referencePageIndicator.setOnClickListener(
                 if (isMarkdown) null else View.OnClickListener { showReferencePageJumpDialog() },
@@ -4064,17 +4109,19 @@ class MainActivity : Activity() {
                 tabBackgroundColor(book?.color, active = true),
             )
             referenceIndicatorContainer.contentDescription =
-                "$title${if (isMarkdown) "" else ", page ${reference.pageIndex + 1} of $pageCount"}. Long press for reference actions"
+                if (isMarkdown) getString(R.string.reference_description, title) else
+                    getString(R.string.reference_document_description, title, reference.pageIndex + 1, pageCount)
         } else if (search != null) {
             val resultCount = search.totalMatches
             val resultLabel = when {
-                search.error != null -> "Failed"
-                search.searchInFlight && resultCount == 0 -> "Searching…"
-                else -> "$resultCount result${if (resultCount == 1) "" else "s"}"
+                search.error != null -> getString(R.string.failed)
+                search.searchInFlight && resultCount == 0 -> getString(R.string.searching)
+                else -> quantityString(R.plurals.search_result_count, resultCount)
             }
-            referenceIndicatorTitle.text = "Search · ${search.query}"
+            referenceIndicatorTitle.text = getString(R.string.search_reference_title, search.query)
             referencePageIndicator.text = resultLabel
-            referencePageIndicator.visibility = View.VISIBLE
+            // Counts/progress are already in the status row; reserve this row for the query.
+            referencePageIndicator.visibility = View.GONE
             referencePageIndicator.isClickable = false
             referencePageIndicator.contentDescription = null
             referencePageIndicator.setOnClickListener(null)
@@ -4082,7 +4129,7 @@ class MainActivity : Activity() {
                 tabBackgroundColor(search.scopeBookId?.let(::bookById)?.color, active = true),
             )
             referenceIndicatorContainer.contentDescription =
-                "Search ${search.query}, $resultLabel. Long press for reference actions"
+                getString(R.string.search_reference_description, search.query, resultLabel)
         }
 
         // Search results keep their close action available even when document chrome
@@ -4139,16 +4186,16 @@ class MainActivity : Activity() {
         if (index !in tabs.indices) return
         val tab = tabs[index]
         val actions = mutableListOf<Pair<String, () -> Unit>>()
-        actions += "Return to tab start · ${pageLocationLabel(tab.bookId, tab.originPageIndex)}" to {
+        actions += getString(R.string.return_tab_start, pageLocationLabel(tab.bookId, tab.originPageIndex)) to {
             returnTabToStart(index)
         }
         if (tabs.size > 1) {
-            actions += "Close" to { closeTab(index) }
-            actions += "Close others" to { closeOtherTabs(index) }
+            actions += getString(R.string.close) to { closeTab(index) }
+            actions += getString(R.string.close_others) to { closeOtherTabs(index) }
         }
         if (actions.isEmpty()) return
         AlertDialog.Builder(this)
-            .setTitle(tab.label)
+            .setTitle(tabLabel(tab))
             .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
             .show()
     }
@@ -4157,12 +4204,12 @@ class MainActivity : Activity() {
         if (!hasReferencePane()) return
         val actions = mutableListOf<Pair<String, () -> Unit>>()
         referenceLocation?.let { reference ->
-            actions += "Return to reference start · ${pageLocationLabel(reference.bookId, reference.originPageIndex)}" to {
+            actions += getString(R.string.return_reference_start, pageLocationLabel(reference.bookId, reference.originPageIndex)) to {
                 returnReferenceToStart()
             }
         }
-        actions += "Close reference" to { closeReference() }
-        val title = referenceLocation?.label ?: textSearchSession?.let { "Search · ${it.query}" } ?: "Reference"
+        actions += getString(R.string.close_reference) to { closeReference() }
+        val title = referenceLocation?.label ?: textSearchSession?.let { getString(R.string.search_reference_title, it.query) } ?: getString(R.string.reference)
         AlertDialog.Builder(this)
             .setTitle(title)
             .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
@@ -4171,9 +4218,9 @@ class MainActivity : Activity() {
 
     private fun pageLocationLabel(bookId: String, pageIndex: Int): String =
         when (bookById(bookId)?.kind) {
-            LibraryItemKind.IMAGE_COLLECTION -> "image ${pageIndex + 1}"
-            LibraryItemKind.MARKDOWN -> bookmarkIndex.contextAtOrBefore(bookId, pageIndex)?.title ?: "start"
-            else -> "p${pageIndex + 1}"
+            LibraryItemKind.IMAGE_COLLECTION -> getString(R.string.image_location, pageIndex + 1)
+            LibraryItemKind.MARKDOWN -> bookmarkIndex.contextAtOrBefore(bookId, pageIndex)?.title ?: getString(R.string.location_start)
+            else -> getString(R.string.page_location, pageIndex + 1)
         }
 
     private fun returnTabToStart(index: Int) {
@@ -4230,6 +4277,16 @@ class MainActivity : Activity() {
         return tabs[activeTabIndex]
     }
 
+    private fun tabLabel(tab: ReaderTab): String = when (tab.labelKind) {
+        TabLabelKind.TEXT -> tab.label
+        TabLabelKind.START -> getString(R.string.tab_start)
+        TabLabelKind.PAGE -> getString(R.string.tab_page, tab.labelPageIndex + 1)
+        TabLabelKind.TEXT_WITH_PAGE -> getString(R.string.tab_text_with_page, tab.label, tab.labelPageIndex + 1)
+    }
+
+    private fun quantityString(id: Int, count: Int, vararg args: Any): String =
+        resources.getQuantityString(id, count, *(if (args.isEmpty()) arrayOf(count) else args))
+
     private fun activeTabOrNull(): ReaderTab? {
         if (tabs.isEmpty()) return null
         activeTabIndex = activeTabIndex.coerceIn(0, tabs.lastIndex)
@@ -4273,7 +4330,7 @@ class MainActivity : Activity() {
     ) {
         val density = resources.displayMetrics.density
         val chipHeight = (48 * density).roundToInt()
-        val allChipWidth = (56 * density).roundToInt()
+        val allChipMinWidth = (56 * density).roundToInt()
         val chipMargin = (4 * density).roundToInt()
         val horizontalPadding = (12 * density).roundToInt()
         val chipMaxWidth = (220 * density).roundToInt()
@@ -4283,7 +4340,7 @@ class MainActivity : Activity() {
             val bookId = book?.id
             val selected = bookId == selectedBookId
             val label: CharSequence = if (book == null) {
-                "All"
+                getString(R.string.all)
             } else {
                 SpannableString("●  ${book.title}").apply {
                     setSpan(
@@ -4302,8 +4359,8 @@ class MainActivity : Activity() {
                     maxLines = 1
                     maxWidth = chipMaxWidth
                     ellipsize = TextUtils.TruncateAt.END
-                    minWidth = 0
-                    minimumWidth = 0
+                    minWidth = if (book == null) allChipMinWidth else 0
+                    minimumWidth = minWidth
                     minHeight = 0
                     minimumHeight = 0
                     typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
@@ -4314,14 +4371,14 @@ class MainActivity : Activity() {
                     // Assign padding last: the inset background replaces the view's padding.
                     setPadding(horizontalPadding, 0, horizontalPadding, 0)
                     contentDescription = if (book == null) {
-                        "Search all table items"
+                        getString(R.string.search_all_items_description)
                     } else {
-                        "Search ${book.title}"
+                        getString(R.string.search_book_description, book.title)
                     }
                     setOnClickListener { onSelected(bookId) }
                 },
                 LinearLayout.LayoutParams(
-                    if (book == null) allChipWidth else ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
                     chipHeight,
                 ).apply {
                     marginEnd = chipMargin
@@ -4361,7 +4418,7 @@ class MainActivity : Activity() {
         val availablePageCounts = selectedBooks().associate { it.id to it.pageCount }
         val restored = readerSessionRepository.restoreTabs(state, availablePageCounts)
         tabs += restored.tabs
-        if (tabs.isEmpty()) selectedBooks().firstOrNull()?.let { tabs += ReaderTab(it.id, 0, "Start") }
+        if (tabs.isEmpty()) selectedBooks().firstOrNull()?.let { tabs += ReaderTab.start(it.id) }
         if (tabs.isNotEmpty()) {
             activeTabIndex = restored.activeTabIndex.coerceIn(0, tabs.lastIndex)
             currentPage = tabs[activeTabIndex].pageIndex
@@ -4413,7 +4470,7 @@ class MainActivity : Activity() {
             }
 
             val label = TextView(this).apply {
-                text = tab.label
+                text = tabLabel(tab)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 maxWidth = dp(260)
@@ -4441,7 +4498,7 @@ class MainActivity : Activity() {
                     textSize = 18f
                     gravity = Gravity.CENTER
                     setTextColor(uiPalette.textSecondary)
-                    contentDescription = "Close ${tab.label}"
+                    contentDescription = getString(R.string.close_tab_description, tabLabel(tab))
                     setPadding(dp(5), dp(4), dp(8), dp(4))
                     setOnClickListener { closeTab(index) }
                 })
@@ -4474,7 +4531,7 @@ class MainActivity : Activity() {
 
     private fun showBookmarkSearch(initialQuery: String = "") {
         if (selectedBookIds.isEmpty()) {
-            Toast.makeText(this, "Put at least one item on the table first.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.table_required), Toast.LENGTH_LONG).show()
             return
         }
         normalizeSearchScope()
@@ -4507,15 +4564,15 @@ class MainActivity : Activity() {
         }
         inputRow.addView(input, LinearLayout.LayoutParams(0, dp(52), 1f))
         val smartCaseIndicator = TextView(this).apply {
-            text = "Aa"
+            text = getString(R.string.smartcase_marker)
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setTextColor(uiPalette.searchMatch)
             setPadding(dp(9), dp(5), dp(9), dp(5))
             background = controlSurfaceBackground(uiPalette.surfaceSelected)
-            contentDescription = "Case-sensitive search is on"
-            tooltipText = "Case-sensitive search"
+            contentDescription = getString(R.string.smartcase_on_description)
+            tooltipText = getString(R.string.smartcase_tooltip)
             visibility = View.GONE
         }
         inputRow.addView(
@@ -4528,7 +4585,7 @@ class MainActivity : Activity() {
         inputRow.addView(Button(this).apply {
             text = "×"
             textSize = 20f
-            contentDescription = "Close search"
+            contentDescription = getString(R.string.close_search_description)
             setOnClickListener { dialog.dismiss() }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
         container.addView(inputRow)
@@ -4538,27 +4595,31 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val bookmarkMode = TextView(this).apply {
-            text = "Navigate"
+            text = getString(R.string.navigate)
             textSize = 14f
+            setSingleLine(true)
+            minWidth = dp(78)
             gravity = Gravity.CENTER
             isClickable = true
             isFocusable = true
             setPadding(dp(10), 0, dp(10), 0)
-            contentDescription = "Jump to bookmarks and filenames"
+            contentDescription = getString(R.string.navigate_description)
         }
         val textMode = TextView(this).apply {
-            text = "Full text"
+            text = getString(R.string.full_text)
             textSize = 13f
+            setSingleLine(true)
+            minWidth = dp(70)
             gravity = Gravity.CENTER
             isClickable = true
             isFocusable = true
             setPadding(dp(10), 0, dp(10), 0)
-            contentDescription = "Search document text"
+            contentDescription = getString(R.string.search_text_hint)
         }
-        modeAndScopeRow.addView(bookmarkMode, LinearLayout.LayoutParams(dp(78), dp(48)))
+        modeAndScopeRow.addView(bookmarkMode, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)))
         modeAndScopeRow.addView(
             textMode,
-            LinearLayout.LayoutParams(dp(70), dp(48)).apply { marginStart = dp(2) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)).apply { marginStart = dp(2) },
         )
         modeAndScopeRow.addView(
             View(this).apply { setBackgroundColor(uiPalette.divider) },
@@ -4599,7 +4660,7 @@ class MainActivity : Activity() {
             setPadding(dp(4), 0, 0, dp(6))
         }
         val bookmarkMoreButton = Button(this).apply {
-            text = "Show more"
+            text = getString(R.string.show_more)
             textSize = 13f
             isAllCaps = false
             minWidth = 0
@@ -4612,7 +4673,7 @@ class MainActivity : Activity() {
             elevation = 0f
             stateListAnimator = null
             visibility = View.GONE
-            contentDescription = "Load more navigation results"
+            contentDescription = getString(R.string.more_navigation_results_description)
         }
         container.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -4631,7 +4692,7 @@ class MainActivity : Activity() {
         fun updateSmartCaseIndicator(query: String) {
             val caseSensitive = searchMode == SearchMode.BOOKMARKS && FuzzyMatcher.isSmartCase(query)
             smartCaseIndicator.visibility = if (caseSensitive) View.VISIBLE else View.GONE
-            summary.text = summaryBase + if (caseSensitive) " · Aa case-sensitive" else ""
+            summary.text = if (caseSensitive) getString(R.string.smartcase_summary, summaryBase) else summaryBase
         }
 
         val list = ListView(this).apply {
@@ -4670,7 +4731,7 @@ class MainActivity : Activity() {
             setPadding(dp(8), dp(18), dp(8), dp(26))
         }
         val textExplanation = TextView(this).apply {
-            text = "Search results stay in the reference pane. Full-text search ignores case; plain words are combined and the final word also matches prefixes."
+            text = getString(R.string.text_search_explanation)
             textSize = 14f
             gravity = Gravity.CENTER
             setTextColor(uiPalette.textSecondary)
@@ -4678,7 +4739,7 @@ class MainActivity : Activity() {
         }
         textAction.addView(textExplanation)
         val runTextSearch = Button(this).apply {
-            text = "Search selected documents"
+            text = getString(R.string.search_selected_documents)
             setOnClickListener {
                 val query = input.text.toString().trim()
                 if (query.length < 2 || TextSearchIndexRepository.matchExpression(query) == null) return@setOnClickListener
@@ -4705,11 +4766,11 @@ class MainActivity : Activity() {
             bookmarkTotalMatches = snapshot.totalMatches
             adapter.notifyDataSetChanged()
             val matchLabel = if (bookmarkTotalMatches > results.size) {
-                "${results.size} of $bookmarkTotalMatches matches"
+                quantityString(R.plurals.matches_shown, bookmarkTotalMatches, results.size, bookmarkTotalMatches)
             } else {
-                "$bookmarkTotalMatches match${if (bookmarkTotalMatches == 1) "" else "es"}"
+                quantityString(R.plurals.match_count, bookmarkTotalMatches)
             }
-            summaryBase = "Destinations · $matchLabel · $currentScopeSummary"
+            summaryBase = getString(R.string.navigate_summary, matchLabel, currentScopeSummary)
             bookmarkMoreButton.visibility = if (results.size < bookmarkTotalMatches) {
                 View.VISIBLE
             } else {
@@ -4743,14 +4804,16 @@ class MainActivity : Activity() {
                 booksForSearchScope(searchScopeBookId)
             }
             currentScopeSummary = searchScopeBookId?.let { bookById(it)?.title } ?: run {
-                "${scopedBooks.size} ${if (mode == SearchMode.TEXT) "document" else "item"}" +
-                    if (scopedBooks.size == 1) "" else "s"
+                quantityString(
+                    if (mode == SearchMode.TEXT) R.plurals.document_count else R.plurals.item_count,
+                    scopedBooks.size,
+                )
             }
             val query = input.text.toString()
             input.hint = if (mode == SearchMode.BOOKMARKS) {
-                "Search bookmarks and filenames"
+                getString(R.string.search_navigation_hint)
             } else {
-                "Search document text"
+                getString(R.string.search_text_hint)
             }
             bookmarkMode.background = if (mode == SearchMode.BOOKMARKS) {
                 chromeButtonBackground(uiPalette.accent)
@@ -4762,6 +4825,9 @@ class MainActivity : Activity() {
             } else {
                 chromeOutlinedButtonBackground(uiPalette.surfaceRaised, uiPalette.accent)
             }
+            // Switching inset backgrounds resets padding; restore it for both modes.
+            bookmarkMode.setPadding(dp(10), 0, dp(10), 0)
+            textMode.setPadding(dp(10), 0, dp(10), 0)
             bookmarkMode.setTextColor(
                 if (mode == SearchMode.BOOKMARKS) uiPalette.onAccent else uiPalette.textPrimary,
             )
@@ -4777,13 +4843,13 @@ class MainActivity : Activity() {
             if (mode == SearchMode.TEXT) {
                 bookmarkMoreButton.visibility = View.GONE
                 summaryBase = if (scopedBooks.isEmpty()) {
-                    "Full text · selected images have no searchable text"
+                    getString(R.string.full_text_images_only)
                 } else {
-                    "Full text · $currentScopeSummary"
+                    getString(R.string.full_text_scope_summary, currentScopeSummary)
                 }
             }
             updateSmartCaseIndicator(query)
-            runTextSearch.text = if (searchScopeBookId == null) "Search all text" else "Search this document"
+            runTextSearch.text = if (searchScopeBookId == null) getString(R.string.search_all_text) else getString(R.string.search_this_document)
             if (mode == SearchMode.BOOKMARKS) updateBookmarkResults(query) else updateTextButton(query)
         }
 
@@ -4952,34 +5018,34 @@ class MainActivity : Activity() {
             holder.colorDot.background = circleBackground(book?.color ?: uiPalette.textMuted)
             holder.title.text = item.title
             holder.detail.text = when {
-                book == null -> "Missing library item"
+                book == null -> getString(R.string.missing_library_item)
                 item.source == BookmarkSource.FILE_ROOT && book.kind == LibraryItemKind.IMAGE_COLLECTION ->
-                    "Image album · ${book.pageCount} image${if (book.pageCount == 1) "" else "s"}"
+                    quantityString(R.plurals.image_album_summary, book.pageCount)
                 item.source == BookmarkSource.FILE_ROOT ->
                     when (book.kind) {
-                        LibraryItemKind.MARKDOWN -> "Markdown note · no headings"
-                        else -> "PDF · ${book.pageCount} pages · no bookmarks"
+                        LibraryItemKind.MARKDOWN -> getString(R.string.markdown_no_headings)
+                        else -> quantityString(R.plurals.pdf_no_bookmarks, book.pageCount)
                     }
                 book.kind == LibraryItemKind.IMAGE_COLLECTION ->
-                    "${book.title} · image ${item.pageNumber}/${book.pageCount}"
+                    getString(R.string.image_result_detail, book.title, item.pageNumber, book.pageCount)
                 book.kind == LibraryItemKind.MARKDOWN -> {
                     val path = if (item.path != item.title) "${item.path} · " else ""
-                    "${book.title} · ${path}heading"
+                    getString(R.string.heading_result_detail, book.title, path)
                 }
                 else -> {
                     val path = if (item.path != item.title) "${item.path} · " else ""
-                    "${book.title} · ${path}p${item.pageNumber}"
+                    getString(R.string.pdf_result_detail, book.title, path, item.pageNumber)
                 }
             }
             val tabIsOpen = tabs.any { it.anchorKey == item.identityKey }
             holder.plus.text = if (tabIsOpen) "✓" else "+"
             holder.plus.textSize = if (tabIsOpen) 18f else 22f
             holder.plus.contentDescription = if (tabIsOpen) {
-                "Open ${item.title} tab"
+                getString(R.string.open_existing_tab_description, item.title)
             } else {
-                "Open ${item.title} in a new tab. Hold to add it in the background"
+                getString(R.string.open_new_tab_description, item.title)
             }
-            holder.alongside.contentDescription = "Open ${item.title} alongside"
+            holder.alongside.contentDescription = getString(R.string.open_reference_description, item.title)
             row.setOnClickListener { onOpen(item) }
             holder.plus.setOnClickListener {
                 if (tabs.any { it.anchorKey == item.identityKey }) {
@@ -5005,7 +5071,7 @@ class MainActivity : Activity() {
         if (normalized.length < 2 || TextSearchIndexRepository.matchExpression(normalized) == null) return
         normalizeSearchScope()
         if (booksForTextSearchScope(searchScopeBookId).isEmpty()) {
-            Toast.makeText(this, "Selected images have no searchable text", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.images_not_searchable), Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -5198,24 +5264,23 @@ class MainActivity : Activity() {
         if (!::referenceSearchStatus.isInitialized) return
         val session = textSearchSession ?: return
         val failed = session.bookIds.count { textIndexCoordinator.failure(it) != null }
-        val documentLabel = "${session.bookIds.size} document" +
-            if (session.bookIds.size == 1) "" else "s"
         val matchLabel = if (session.totalMatches > session.results.size) {
-            "${session.results.size} of ${session.totalMatches} matches"
+            quantityString(R.plurals.matches_shown, session.totalMatches, session.results.size, session.totalMatches)
         } else {
-            "${session.totalMatches} match${if (session.totalMatches == 1) "" else "es"}"
+            quantityString(R.plurals.match_count, session.totalMatches)
         }
         referenceSearchStatus.text = when {
-            session.error != null -> "Search failed: ${session.error}"
-            session.totalPages == 0 -> "Selected images have no searchable text"
-            session.searchInFlight && session.results.isEmpty() -> "Searching $documentLabel…"
-            session.searchInFlight -> "Updating… · $matchLabel"
+            session.error != null -> getString(R.string.search_failed, session.error)
+            session.totalPages == 0 -> getString(R.string.images_not_searchable)
+            session.searchInFlight && session.results.isEmpty() -> quantityString(R.plurals.searching_documents, session.bookIds.size)
+            session.searchInFlight -> getString(R.string.updating_search, matchLabel)
             session.indexedPages < session.totalPages -> buildString {
-                append("$matchLabel so far")
-                append(" · indexing ${session.indexedPages}/${session.totalPages} parts")
-                if (failed > 0) append(" · $failed text index${if (failed == 1) "" else "es"} failed")
+                append(getString(R.string.search_matches_so_far, matchLabel))
+                append(getString(R.string.search_indexing_progress, session.indexedPages, session.totalPages))
+                if (failed > 0) append(quantityString(R.plurals.text_indexes_failed, failed))
             }
-            else -> "$matchLabel · ${session.readyBooks}/${session.bookIds.size} documents indexed"
+            else -> quantityString(R.plurals.search_indexing_complete, session.bookIds.size,
+                matchLabel, session.readyBooks, session.bookIds.size)
         }
         referenceSearchMoreButton.visibility = if (
             !session.searchInFlight && session.error == null &&
@@ -5315,7 +5380,7 @@ class MainActivity : Activity() {
                 ?.substringBeforeLast(" › ", missingDelimiterValue = "")
                 ?.takeIf { it.isNotBlank() }
             val bookAndContext = buildString {
-                append(book?.title ?: if (markdown) "Missing note" else "Missing book")
+                append(book?.title ?: if (markdown) getString(R.string.missing_note) else getString(R.string.missing_book))
                 parentPath?.let {
                     append(" · ")
                     append(it)
@@ -5325,15 +5390,15 @@ class MainActivity : Activity() {
                 if ((position + 1) % 2 == 0) uiPalette.surfaceRaised else uiPalette.surface,
             )
             holder.colorDot.background = circleBackground(book?.color ?: uiPalette.textMuted)
-            holder.title.text = context?.title ?: if (markdown) "Start" else "Page ${item.pageIndex + 1}"
+            holder.title.text = context?.title ?: if (markdown) getString(R.string.tab_start) else getString(R.string.tab_page, item.pageIndex + 1)
             holder.detail.text = if (markdown) {
-                "$bookAndContext · note section"
+                getString(R.string.note_section_detail, bookAndContext)
             } else {
-                "$bookAndContext · p${item.pageIndex + 1}" +
+                getString(R.string.page_section_detail, bookAndContext, item.pageIndex + 1) +
                     when {
                         context == null -> ""
-                        preciseContextKnown -> " · section"
-                        else -> " · near section"
+                        preciseContextKnown -> getString(R.string.exact_section_suffix)
+                        else -> getString(R.string.near_section_suffix)
                     }
             }
             holder.snippet.text = styledTextSnippet(item.snippet)
@@ -5342,9 +5407,9 @@ class MainActivity : Activity() {
             holder.plus.text = if (tabIsOpen) "✓" else "+"
             holder.plus.textSize = if (tabIsOpen) 18f else 22f
             holder.plus.contentDescription = if (tabIsOpen) {
-                "Open text result tab"
+                getString(R.string.open_text_tab_description)
             } else {
-                "Open text result in a new tab. Hold to add it in the background"
+                getString(R.string.open_new_text_tab_description)
             }
             row.setOnClickListener { openTextSearchHit(item, newTabRequested = false) }
             holder.plus.setOnClickListener {
@@ -5365,13 +5430,14 @@ class MainActivity : Activity() {
     private fun textSearchAnchorKey(hit: TextSearchHit, book: BookRecord?): String =
         "${hit.bookId}|text-${if (book?.kind == LibraryItemKind.MARKDOWN) "section" else "page"}:${hit.pageIndex}"
 
-    private fun textSearchTabLabel(hit: TextSearchHit, book: BookRecord): String {
+    private fun textSearchTabTitle(hit: TextSearchHit, book: BookRecord): TabTitle {
         val pageIndex = hit.pageIndex.coerceIn(0, book.pageCount - 1)
         val context = bookmarkIndex.contextAtOrBefore(hit.bookId, pageIndex)
         return if (book.kind == LibraryItemKind.MARKDOWN) {
-            context?.title ?: "Start"
+            context?.title?.let { TabTitle(it) } ?: TabTitle(kind = TabLabelKind.START)
         } else {
-            context?.title?.let { "$it · p${pageIndex + 1}" } ?: "Page ${pageIndex + 1}"
+            context?.title?.let { TabTitle(it, TabLabelKind.TEXT_WITH_PAGE, pageIndex) }
+                ?: TabTitle(kind = TabLabelKind.PAGE, pageIndex = pageIndex)
         }
     }
 
@@ -5398,9 +5464,9 @@ class MainActivity : Activity() {
         tabs += ReaderTab(
             bookId = hit.bookId,
             pageIndex = pageIndex,
-            label = textSearchTabLabel(hit, book),
+            label = "",
             anchorKey = anchorKey,
-        )
+        ).apply { setTitle(textSearchTabTitle(hit, book)) }
         persistSession()
         renderTabBar()
     }
@@ -5442,7 +5508,7 @@ class MainActivity : Activity() {
         val book = bookById(hit.bookId) ?: return
         capturePrimaryImageViewport()
         val pageIndex = hit.pageIndex.coerceIn(0, book.pageCount - 1)
-        val label = textSearchTabLabel(hit, book)
+        val title = textSearchTabTitle(hit, book)
         val anchorKey = textSearchAnchorKey(hit, book)
         val highlight = textSearchHighlight(hit, session, anchorKey, pageIndex)
         tabSearchHighlights[anchorKey] = highlight
@@ -5465,7 +5531,7 @@ class MainActivity : Activity() {
         }
 
         if (newTabRequested || activeTabOrNull() == null) {
-            tabs += ReaderTab(hit.bookId, pageIndex, label, anchorKey)
+            tabs += ReaderTab(hit.bookId, pageIndex, "", anchorKey).apply { setTitle(title) }
             activeTabIndex = tabs.lastIndex
         } else {
             val tab = activeTab()
@@ -5475,7 +5541,7 @@ class MainActivity : Activity() {
             tab.apply {
                 bookId = hit.bookId
                 this.pageIndex = pageIndex
-                this.label = label
+                setTitle(title)
                 this.anchorKey = anchorKey
                 this.originPageIndex = pageIndex
             }
@@ -5500,7 +5566,7 @@ class MainActivity : Activity() {
         activeTab().pageIndex = currentPage
         persistSession()
         updatePageIndicator()
-        setStatus("Preparing page ${currentPage + 1}…")
+        setStatus(getString(R.string.preparing_page, currentPage + 1))
 
         readerSurface.post {
             if (isDestroyed || generation != renderGeneration) return@post
@@ -5546,7 +5612,7 @@ class MainActivity : Activity() {
             // In spread mode, keep the previous complete visual unit visible until the
             // new unit is ready. This also covers the standalone cover/last page.
 
-            setStatus("Rendering page ${first + 1}${second?.let { "–${it + 1}" } ?: ""}…")
+            setStatus(getString(R.string.rendering_pages, if (second == null) "${first + 1}" else "${first + 1}–${second + 1}"))
             submitRenderWork {
                 try {
                     if (generation != renderGeneration || document !== pdf || pdfBookId != bookId || destroying) return@submitRenderWork
@@ -5567,7 +5633,7 @@ class MainActivity : Activity() {
                         schedulePrefetch(bookId, document.pageCount, surfaceWidth, first)
                     }
                 } catch (t: Throwable) {
-                    showError("Render failed", t)
+                    showError(getString(R.string.render_failed), t)
                 }
             }
         }
@@ -5601,7 +5667,7 @@ class MainActivity : Activity() {
         )
         persistSession()
         val section = document.content.sections[currentPage]
-        setStatus("${activeBook()?.title ?: "Note"} · ${section.title}")
+        setStatus("${activeBook()?.title ?: getString(R.string.note)} · ${section.title}")
         updatePageIndicator()
         updateEmptyState()
     }
@@ -5619,7 +5685,7 @@ class MainActivity : Activity() {
             referencePendingPageKeys = emptySet()
             referenceDisplayedPageKeys = emptySet()
             updateCachePins()
-            setStatus("Opening note reference…")
+            setStatus(getString(R.string.opening_note_reference))
             submitPrefetchWork {
                 val startedAt = SystemClock.elapsedRealtime()
                 try {
@@ -5650,7 +5716,7 @@ class MainActivity : Activity() {
                     }
                 } catch (t: Throwable) {
                     if (generation == referenceRenderGeneration && reference === referenceLocation) {
-                        showError("Reference note failed", t)
+                        showError(getString(R.string.reference_note_failed), t)
                     }
                 }
             }
@@ -5683,7 +5749,7 @@ class MainActivity : Activity() {
                 return@post
             }
 
-            setStatus("Rendering reference page ${reference.pageIndex + 1}…")
+            setStatus(getString(R.string.rendering_reference_page, reference.pageIndex + 1))
             val queuedAt = SystemClock.elapsedRealtime()
             submitPrefetchWork {
                 val startedAt = SystemClock.elapsedRealtime()
@@ -5746,7 +5812,7 @@ class MainActivity : Activity() {
                         ) {
                             referencePendingPageKeys = emptySet()
                             updateCachePins()
-                            showError("Reference render failed", t)
+                            showError(getString(R.string.reference_render_failed), t)
                         }
                     }
                 }
@@ -5810,7 +5876,7 @@ class MainActivity : Activity() {
                         }
                         val anchorKey = "${target.bookId}|text-page:${target.pageIndex}"
                         tabs.firstOrNull { it.anchorKey == anchorKey }?.let { tab ->
-                            tab.label = "${preciseContext.title} · p${target.pageIndex + 1}"
+                            tab.setTitle(TabTitle(preciseContext.title, TabLabelKind.TEXT_WITH_PAGE, target.pageIndex))
                             renderTabBar()
                             persistSession()
                         }
@@ -5968,8 +6034,9 @@ class MainActivity : Activity() {
         val visible = if (second != null) "${first + 1}–${second + 1}" else "${first + 1}"
         val cacheMb = pageCache.bytes() / (1024.0 * 1024.0)
         val source = if (fromCache) "cached" else "rendered"
-        val unit = if (activeBook()?.kind == LibraryItemKind.IMAGE_COLLECTION) "Image" else "Page"
-        val decodedSize = if (unit == "Image") {
+        val isImage = activeBook()?.kind == LibraryItemKind.IMAGE_COLLECTION
+        val unit = if (isImage) getString(R.string.image) else getString(R.string.page)
+        val decodedSize = if (isImage) {
             primaryDisplayedPageKeys.firstOrNull { it.pageIndex == first }
                 ?.let(pageCache::info)
                 ?.let { " · ${it.width}×${it.height}" }
@@ -6060,7 +6127,7 @@ class MainActivity : Activity() {
             add(first)
             if (second != null) add(second)
         }
-        setStatus("Reading annotations…")
+        setStatus(getString(R.string.reading_annotations))
 
         submitRenderWork {
             try {
@@ -6073,7 +6140,7 @@ class MainActivity : Activity() {
                     setStatus("${annotations.size} annotation(s) on page(s) $visible")
                 }
             } catch (t: Throwable) {
-                showError("Annotation inspection failed", t)
+                showError(getString(R.string.annotation_inspection_failed), t)
             }
         }
     }
@@ -6083,7 +6150,7 @@ class MainActivity : Activity() {
         if (text.isEmpty()) return
         val dialog = AlertDialog.Builder(this)
             .setMessage(text)
-            .setPositiveButton("Close", null)
+            .setPositiveButton(getString(R.string.close), null)
             .create()
         if (immersive) {
             // Prevent a dialog from momentarily pulling the navigation bar back in.
@@ -6120,9 +6187,9 @@ class MainActivity : Activity() {
         }
 
         AlertDialog.Builder(this)
-            .setTitle("Annotation diagnostics")
+            .setTitle(getString(R.string.annotation_diagnostics))
             .setMessage(message)
-            .setPositiveButton("Close", null)
+            .setPositiveButton(getString(R.string.close), null)
             .show()
     }
 
@@ -6182,19 +6249,19 @@ class MainActivity : Activity() {
                     action(result.book)
                 }
                 is BookIndexLoadResult.Missing -> {
-                    val message = "Stored item index is missing"
+                    val message = getString(R.string.index_missing)
                     bookIndexLoadErrors[snapshot.id] = message
                     if (requireLoadedIndex) {
-                        showError("Could not load ${snapshot.title}", IllegalStateException(message))
+                        showError(getString(R.string.cannot_load_item, snapshot.title), IllegalStateException(message))
                     } else {
                         action(snapshot)
                     }
                 }
                 is BookIndexLoadResult.Failed -> {
-                    val message = "Stored item index could not be read: ${result.message}"
+                    val message = getString(R.string.index_unreadable, result.message)
                     bookIndexLoadErrors[snapshot.id] = message
                     if (requireLoadedIndex) {
-                        showError("Could not load ${snapshot.title}", IllegalStateException(message))
+                        showError(getString(R.string.cannot_load_item, snapshot.title), IllegalStateException(message))
                     } else {
                         action(snapshot)
                     }
@@ -6274,7 +6341,7 @@ class MainActivity : Activity() {
                 .asSequence()
                 .mapNotNull(::bookById)
                 .firstOrNull { it.indexLoaded }
-            if (fallback != null) tabs += ReaderTab(fallback.id, 0, "Start")
+            if (fallback != null) tabs += ReaderTab.start(fallback.id)
         }
         activeTabIndex = if (tabs.isEmpty()) 0 else transition.activeTabIndex.coerceIn(tabs.indices)
         currentPage = activeTabOrNull()?.pageIndex ?: 0
@@ -6343,7 +6410,7 @@ class MainActivity : Activity() {
         val selectionVersion = tableSessionController.selectionVersion(bookId)
         val contentToken = tableSessionController.captureContentOperation(bookId)
         val snapshot = book
-        setStatus("Loading ${book.title} index…")
+        setStatus(getString(R.string.loading_item_index, book.title))
         libraryStorage.loadIndex(snapshot) { result ->
             if (
                 destroying || isDestroyed ||
@@ -6360,11 +6427,11 @@ class MainActivity : Activity() {
                     mergeHydratedBookIndex(current, result.book).also(::replaceBook)
                 }
                 is BookIndexLoadResult.Missing -> {
-                    bookIndexLoadErrors[bookId] = "Stored item index is missing"
+                    bookIndexLoadErrors[bookId] = getString(R.string.index_missing)
                     current
                 }
                 is BookIndexLoadResult.Failed -> {
-                    bookIndexLoadErrors[bookId] = "Stored item index could not be read: ${result.message}"
+                    bookIndexLoadErrors[bookId] = getString(R.string.index_unreadable, result.message)
                     current
                 }
             }
@@ -6375,7 +6442,7 @@ class MainActivity : Activity() {
             if (openAfter) {
                 openBookInTab(bookId)
             } else if (tabs.isEmpty() && merged.indexLoaded) {
-                tabs += ReaderTab(bookId, 0, "Start")
+                tabs += ReaderTab.start(bookId)
                 activeTabIndex = 0
                 currentPage = 0
                 persistSession()
@@ -6420,22 +6487,22 @@ class MainActivity : Activity() {
 
     private fun libraryEmptyMessage(): String = when {
         books.isEmpty() ->
-            "No campaign files are known yet.\nAdd a PDF, Markdown note, or folder to start your library."
-        libraryFilter.kind == LibraryFilterKind.ON_TABLE -> "No library items are currently on the table."
-        libraryFilter.kind == LibraryFilterKind.UNTAGGED -> "Every library item has at least one tag."
+            getString(R.string.library_empty_hint)
+        libraryFilter.kind == LibraryFilterKind.ON_TABLE -> getString(R.string.no_items_on_table)
+        libraryFilter.kind == LibraryFilterKind.UNTAGGED -> getString(R.string.no_untagged_items)
         libraryFilter.kind == LibraryFilterKind.TAG -> {
-            val name = libraryTags.firstOrNull { it.id == libraryFilter.tagId }?.name ?: "this tag"
-            "No library items have the tag “$name”."
+            val name = libraryTags.firstOrNull { it.id == libraryFilter.tagId }?.name ?: getString(R.string.this_tag)
+            getString(R.string.no_items_with_tag, name)
         }
-        else -> "No library items match this filter."
+        else -> getString(R.string.no_items_match_filter)
     }
 
     private fun librarySummaryLabel(): String = buildString {
-        append("${libraryVisibleBooks.size} shown · ${selectedBookIds.size} on table · ${books.size} known")
+        append(getString(R.string.library_summary, libraryVisibleBooks.size, selectedBookIds.size, books.size))
         if (libraryFolders.isNotEmpty()) {
-            append(" · ${libraryFolders.size} folder${if (libraryFolders.size == 1) "" else "s"}")
+            append(quantityString(R.plurals.library_folder_count, libraryFolders.size))
         }
-        if (folderScanInProgress) append(" · scanning…")
+        if (folderScanInProgress) append(getString(R.string.scanning_suffix))
     }
 
     private fun populateLibraryTagStrip(row: LinearLayout) {
@@ -6463,8 +6530,18 @@ class MainActivity : Activity() {
                         if (active) uiPalette.surfaceSelected else uiPalette.surfaceRaised,
                     )
                     setPadding(dp(12), 0, dp(12), 0)
-                    contentDescription = "Show $label library items" +
-                        if (longPress == null) "" else ". Long press for tag actions"
+                    if (filter.kind == LibraryFilterKind.TAG) {
+                        val icon = getDrawable(R.drawable.ic_library_tag)?.mutate()?.apply {
+                            setTint(if (active) uiPalette.textPrimary else uiPalette.textSecondary)
+                            setBounds(0, 0, dp(16), dp(16))
+                        }
+                        setCompoundDrawablesRelative(icon, null, null, null)
+                        compoundDrawablePadding = dp(6)
+                    }
+                    contentDescription = getString(
+                        if (longPress == null) R.string.library_filter_description else R.string.library_tag_filter_description,
+                        label,
+                    )
                     setOnClickListener {
                         libraryFilter = filter
                         refreshLibraryUi()
@@ -6481,15 +6558,28 @@ class MainActivity : Activity() {
             )
         }
 
-        addFilter("All", LibraryFilter(LibraryFilterKind.ALL))
-        addFilter("On table", LibraryFilter(LibraryFilterKind.ON_TABLE))
+        addFilter(getString(R.string.all), LibraryFilter(LibraryFilterKind.ALL))
+        addFilter(getString(R.string.on_table), LibraryFilter(LibraryFilterKind.ON_TABLE))
+        addFilter(getString(R.string.untagged), LibraryFilter(LibraryFilterKind.UNTAGGED)) {
+            showUntaggedActions()
+        }
+        if (libraryTags.isNotEmpty()) {
+            row.addView(
+                View(this).apply {
+                    setBackgroundColor(uiPalette.divider)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(dp(1).coerceAtLeast(1), dp(24)).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    marginStart = dp(4)
+                    marginEnd = dp(8)
+                },
+            )
+        }
         libraryTags.sortedBy { it.name.lowercase(Locale.ROOT) }.forEach { tag ->
             addFilter(tag.name, LibraryFilter(LibraryFilterKind.TAG, tag.id)) {
                 showLibraryTagActions(tag.id)
             }
-        }
-        addFilter("Untagged", LibraryFilter(LibraryFilterKind.UNTAGGED)) {
-            showUntaggedActions()
         }
     }
 
@@ -6519,7 +6609,7 @@ class MainActivity : Activity() {
             if (existing == activeTabIndex) activateCurrentTab() else switchToTab(existing)
             return
         }
-        tabs += ReaderTab(bookId, 0, "Start")
+        tabs += ReaderTab.start(bookId)
         activeTabIndex = tabs.lastIndex
         currentPage = 0
         activateCurrentTab()
@@ -6537,6 +6627,7 @@ class MainActivity : Activity() {
 
     private fun showLibrary() {
         if (!requireCatalogReady()) return
+        restoreLibraryAfterLoad = false
         if (libraryDialog?.isShowing == true) return
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
@@ -6565,29 +6656,37 @@ class MainActivity : Activity() {
             }
         }
 
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        val libraryMenuButton = Button(this).apply {
+            text = "⋮"
+            textSize = 22f
+            gravity = Gravity.CENTER
+            minimumWidth = 0
+            minimumHeight = 0
+            setPadding(0, 0, 0, 0)
+            background = chromeButtonBackground(colorWithAlpha(uiPalette.surface, 0xe6))
+            contentDescription = getString(R.string.library_menu_description)
+            setOnClickListener { showMainMenu(MenuContext.LIBRARY) }
         }
-        header.addView(TextView(this).apply {
-            text = "Library"
+        val libraryTitle = TextView(this).apply {
+            text = getString(R.string.library)
             textSize = 26f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(uiPalette.textPrimary)
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        header.addView(Button(this).apply {
-            text = "Add file"
+        }
+        val addFileButton = Button(this).apply {
+            text = getString(R.string.add_file)
             setOnClickListener { chooseLibraryDocument() }
-        })
-        header.addView(Button(this).apply {
-            text = "Add folder"
+        }
+        val addFolderButton = Button(this).apply {
+            text = getString(R.string.add_folder)
             setOnClickListener { chooseLibraryFolder() }
-        })
-        header.addView(Button(this).apply {
-            text = "Read"
+        }
+        val readButton = Button(this).apply {
+            text = getString(R.string.read)
             setOnClickListener { returnToReaderFromLibrary() }
-        })
-        content.addView(header)
+        }
+        content.addView(LibraryHeader(this, libraryMenuButton, libraryTitle, addFileButton, addFolderButton, readButton),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         val tagStrip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -6625,7 +6724,7 @@ class MainActivity : Activity() {
         val gridFrame = FrameLayout(this)
         val grid = GridView(this).apply {
             numColumns = GridView.AUTO_FIT
-            columnWidth = dp(220)
+            columnWidth = dp(260)
             horizontalSpacing = dp(12)
             verticalSpacing = dp(12)
             stretchMode = GridView.STRETCH_COLUMN_WIDTH
@@ -6643,6 +6742,7 @@ class MainActivity : Activity() {
         gridFrame.addView(empty, FrameLayout.LayoutParams(-1, -1))
         grid.emptyView = empty
 
+        val previews = libraryPreviewLoader ?: LibraryPreviewLoader.shared(this).also { libraryPreviewLoader = it }
         val adapter = object : BaseAdapter() {
             override fun getCount(): Int = libraryVisibleBooks.size
             override fun getItem(position: Int): BookRecord = libraryVisibleBooks[position]
@@ -6651,97 +6751,46 @@ class MainActivity : Activity() {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
                 val book = getItem(position)
                 val selected = book.id in selectedBookIds
-                return LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    minimumHeight = dp(150)
-                    setPadding(dp(14), dp(10), dp(10), dp(12))
-                    background = controlBackground(
-                        if (selected) uiPalette.surfaceSelected else uiPalette.surfaceRaised,
-                    )
-                    elevation = 0f
-                    setOnClickListener { requestBookSelectionToggle(book.id) }
-
-                    addView(LinearLayout(this@MainActivity).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        addView(
-                            View(this@MainActivity).apply { background = circleBackground(book.color) },
-                            LinearLayout.LayoutParams(dp(14), dp(14)).apply { marginEnd = dp(8) },
-                        )
-                        addView(CheckBox(this@MainActivity).apply {
-                            isChecked = selected
-                            isClickable = false
-                            text = if (selected) "On table" else "In library"
-                            setTextColor(uiPalette.textSecondary)
-                        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                        addView(Button(this@MainActivity).apply {
-                            text = "⋮"
-                            contentDescription = "Actions for ${book.title}"
-                            setOnClickListener { showBookActions(book.id) }
-                        }, LinearLayout.LayoutParams(dp(48), dp(48)))
-                    })
-
-                    addView(TextView(this@MainActivity).apply {
-                        text = book.fileName
-                        textSize = 17f
-                        typeface = Typeface.DEFAULT_BOLD
-                        setTextColor(uiPalette.textPrimary)
-                        maxLines = 2
-                    })
-                    val tagNames = libraryTags
-                        .filter { it.id in book.tagIds }
-                        .map { it.name }
-                        .sortedBy { it.lowercase(Locale.ROOT) }
-                    if (tagNames.isNotEmpty()) addView(TextView(this@MainActivity).apply {
-                        val visibleTags = tagNames.take(2).joinToString(" · ")
-                        text = visibleTags + if (tagNames.size > 2) " · +${tagNames.size - 2}" else ""
-                        textSize = 12f
-                        setTextColor(uiPalette.textSecondary)
-                        maxLines = 1
-                        ellipsize = TextUtils.TruncateAt.END
-                        setPadding(0, dp(4), 0, 0)
-                    })
-                    addView(TextView(this@MainActivity).apply {
-                        text = when (book.kind) {
-                            LibraryItemKind.IMAGE_COLLECTION ->
-                                "Image album · ${book.pageCount} image${if (book.pageCount == 1) "" else "s"}"
-                            LibraryItemKind.MARKDOWN ->
-                                "Markdown note · ${book.bookmarkCount} heading${if (book.bookmarkCount == 1) "" else "s"}"
-                            LibraryItemKind.PDF -> {
-                                val toc = book.externalTocLabel?.let { " · TXT: $it" }.orEmpty()
-                                "${book.pageCount} pages · ${book.bookmarkCount} bookmarks$toc"
-                            }
-                        }
-                        textSize = 12f
-                        setTextColor(uiPalette.textSecondary)
-                        maxLines = 2
-                        setPadding(0, dp(5), 0, 0)
-                    })
-                    if (book.id in unavailableBookIds) addView(TextView(this@MainActivity).apply {
-                        text = "Source unavailable"
-                        textSize = 12f
-                        setTextColor(uiPalette.error)
-                        setPadding(0, dp(5), 0, 0)
-                    })
-                    bookIndexLoadErrors[book.id]?.let { indexError ->
-                        addView(TextView(this@MainActivity).apply {
-                            text = indexError
-                            textSize = 12f
-                            setTextColor(uiPalette.error)
-                            setPadding(0, dp(5), 0, 0)
-                        })
+                val card = convertView as? LibraryCardView ?: LibraryCardView(
+                    this@MainActivity, uiPalette, previews, ::controlBackground,
+                    ::requestBookSelectionToggle, ::showBookActions,
+                )
+                val tagNames = libraryTags.filter { it.id in book.tagIds }.map { it.name }
+                    .sortedBy { it.lowercase(Locale.ROOT) }
+                val visibleTags = tagNames.take(2).joinToString(" · ")
+                val tags = if (tagNames.size > 2) getString(R.string.tags_with_more, visibleTags, tagNames.size - 2) else visibleTags
+                val summary = when (book.kind) {
+                    LibraryItemKind.IMAGE_COLLECTION -> quantityString(R.plurals.image_album_summary, book.pageCount)
+                    LibraryItemKind.MARKDOWN -> quantityString(R.plurals.note_heading_summary, book.bookmarkCount)
+                    LibraryItemKind.PDF -> {
+                        val toc = book.externalTocLabel?.let { getString(R.string.toc_source_suffix, it) }.orEmpty()
+                        getString(R.string.pdf_library_summary, quantityString(R.plurals.page_count, book.pageCount),
+                            quantityString(R.plurals.bookmark_count, book.bookmarkCount), toc)
                     }
                 }
+                val problem = if (book.id in unavailableBookIds) getString(R.string.source_unavailable) else bookIndexLoadErrors[book.id]
+                card.bind(book, selected, tags, summary, problem)
+                return card
             }
         }
         libraryAdapter = adapter
         grid.adapter = adapter
         content.addView(gridFrame, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        val dialog = Dialog(
+        val dialog = object : Dialog(
             this,
             if (uiPalette.isDark) R.style.FullScreenDialogThemeDark else R.style.FullScreenDialogThemeLight,
-        ).apply {
+        ) {
+            override fun onWindowFocusChanged(hasFocus: Boolean) {
+                super.onWindowFocusChanged(hasFocus)
+                val libraryWindow = window ?: return
+                if (hasFocus && immersive) libraryWindow.decorView.post {
+                    if (!destroying && immersive && libraryWindow.decorView.hasWindowFocus()) {
+                        applyImmersiveToWindow(libraryWindow, true)
+                    }
+                }
+            }
+        }.apply {
             setContentView(content)
             setOnDismissListener {
                 if (libraryDialog === this) {
@@ -6757,7 +6806,7 @@ class MainActivity : Activity() {
         libraryDialog = dialog
         dialog.show()
         dialog.window?.let { libraryWindow ->
-            applySystemBarIconTheme(libraryWindow)
+            applyImmersiveToWindow(libraryWindow, immersive)
             libraryWindow.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             content.requestApplyInsets()
         }
@@ -6775,20 +6824,19 @@ class MainActivity : Activity() {
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("Take ${book.title} off the table?")
+            .setTitle(getString(R.string.take_item_off_table_title, book.title))
             .setMessage(
-                "Its open tabs and temporary reference will close. Metadata, color, and visit " +
-                    "history will remain in the library.",
+                getString(R.string.take_off_table_message),
             )
-            .setPositiveButton("Take off table") { _, _ -> deselectBook(bookId) }
-            .setNegativeButton("Cancel", null)
+            .setPositiveButton(getString(R.string.take_off_table)) { _, _ -> deselectBook(bookId) }
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
     private fun returnToReaderFromLibrary() {
         val first = selectedBooks().firstOrNull()
         if (first == null) {
-            Toast.makeText(this, "Select at least one item", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.select_at_least_one), Toast.LENGTH_SHORT).show()
             return
         }
         libraryDialog?.dismiss()
@@ -6797,42 +6845,43 @@ class MainActivity : Activity() {
 
     private fun showBookActions(bookId: String) {
         val book = bookById(bookId) ?: return
+        // Resource IDs identify actions; translated display text never controls behavior.
         val actions = buildList {
-            add(if (book.id in selectedBookIds) "Open" else "Put on table and open")
-            if (book.id in selectedBookIds) add("Take off table")
-            add("Tags…")
+            add(if (book.id in selectedBookIds) R.string.open else R.string.put_on_table_and_open)
+            if (book.id in selectedBookIds) add(R.string.take_off_table)
+            add(R.string.tags)
             if (book.kind == LibraryItemKind.PDF) {
-                add(if (book.externalTocLabel == null) "Import TXT TOC" else "Replace TXT TOC")
-                if (book.externalTocLabel != null) add("Remove TXT TOC")
+                add(if (book.externalTocLabel == null) R.string.import_txt_toc else R.string.replace_txt_toc)
+                if (book.externalTocLabel != null) add(R.string.remove_txt_toc)
             }
-            add("Choose color")
+            add(R.string.choose_color)
             if (book.kind == LibraryItemKind.PDF) {
-                add("Refresh PDF")
-                add("Rebuild text index")
-                add("Relink/replace PDF")
+                add(R.string.refresh_pdf)
+                add(R.string.rebuild_text_index)
+                add(R.string.relink_pdf)
             } else if (book.kind == LibraryItemKind.MARKDOWN) {
-                add("Refresh note")
-                add("Rebuild text index")
-                add("Relink/replace note")
+                add(R.string.refresh_note)
+                add(R.string.rebuild_text_index)
+                add(R.string.relink_note)
             } else {
-                add("Rescan source folder")
+                add(R.string.rescan_source_folder)
             }
-            add("Forget item and history")
+            add(R.string.forget_item_and_history)
         }
         AlertDialog.Builder(this)
             .setTitle(book.title)
-            .setItems(actions.toTypedArray()) { _, which ->
+            .setItems(actions.map { getString(it) }.toTypedArray()) { _, which ->
                 when (actions[which]) {
-                    "Open", "Put on table and open" -> {
+                    R.string.open, R.string.put_on_table_and_open -> {
                         libraryDialog?.dismiss()
                         selectBook(book.id, openAfter = true)
                     }
-                    "Take off table" -> requestBookSelectionToggle(book.id)
-                    "Tags…" -> showBookTagEditor(book.id)
-                    "Import TXT TOC", "Replace TXT TOC" -> withHydratedBook(book.id) {
+                    R.string.take_off_table -> requestBookSelectionToggle(book.id)
+                    R.string.tags -> showBookTagEditor(book.id)
+                    R.string.import_txt_toc, R.string.replace_txt_toc -> withHydratedBook(book.id) {
                         chooseExternalToc(it.id)
                     }
-                    "Remove TXT TOC" -> withHydratedBook(book.id) { hydrated ->
+                    R.string.remove_txt_toc -> withHydratedBook(book.id) { hydrated ->
                         val token = tableSessionController.beginContentOperation(book.id)
                         val sourceResult = hydrated.copy(
                             externalBookmarks = emptyList(),
@@ -6860,13 +6909,12 @@ class MainActivity : Activity() {
                             resumeActiveDocumentAfterIndexChange(book.id)
                         }
                     }
-                    "Choose color" -> showBookColorDialog(book.id)
-                    "Refresh PDF" -> refreshLibraryBook(book.id)
-                    "Refresh note" -> refreshLibraryBook(book.id)
-                    "Rebuild text index" -> rebuildBookTextIndex(book.id)
-                    "Relink/replace PDF", "Relink/replace note" -> chooseRelinkSource(book.id)
-                    "Rescan source folder" -> rescanLibraryFolders()
-                    "Forget item and history" -> confirmForgetBook(book.id)
+                    R.string.choose_color -> showBookColorDialog(book.id)
+                    R.string.refresh_pdf, R.string.refresh_note -> refreshLibraryBook(book.id)
+                    R.string.rebuild_text_index -> rebuildBookTextIndex(book.id)
+                    R.string.relink_pdf, R.string.relink_note -> chooseRelinkSource(book.id)
+                    R.string.rescan_source_folder -> rescanLibraryFolders()
+                    R.string.forget_item_and_history -> confirmForgetBook(book.id)
                 }
             }
             .show()
@@ -6881,19 +6929,19 @@ class MainActivity : Activity() {
         }
         val checked = BooleanArray(orderedTags.size) { index -> orderedTags[index].id in book.tagIds }
         AlertDialog.Builder(this)
-            .setTitle("Tags for ${book.fileName}")
+            .setTitle(getString(R.string.tags_for_item, book.fileName))
             .setMultiChoiceItems(
                 orderedTags.map { it.name }.toTypedArray(),
                 checked,
             ) { _, which, selected -> checked[which] = selected }
-            .setPositiveButton("Save") { _, _ ->
+            .setPositiveButton(getString(R.string.save)) { _, _ ->
                 updateBookTags(
                     bookId,
                     orderedTags.filterIndexed { index, _ -> checked[index] }
                         .mapTo(linkedSetOf()) { it.id },
                 )
             }
-            .setNeutralButton("New tag") { _, _ ->
+            .setNeutralButton(getString(R.string.new_tag)) { _, _ ->
                 updateBookTags(
                     bookId,
                     orderedTags.filterIndexed { index, _ -> checked[index] }
@@ -6901,7 +6949,7 @@ class MainActivity : Activity() {
                 )
                 mainHandler.post { showCreateTagDialog(assignBookId = bookId) }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
@@ -6917,16 +6965,16 @@ class MainActivity : Activity() {
 
     private fun showCreateTagDialog(assignBookId: String? = null) {
         val input = EditText(this).apply {
-            hint = "Tag name"
+            hint = getString(R.string.tag_name)
             setSingleLine(true)
         }
         AlertDialog.Builder(this)
-            .setTitle("New library tag")
+            .setTitle(getString(R.string.new_library_tag))
             .setView(input)
-            .setPositiveButton("Create") { _, _ ->
+            .setPositiveButton(getString(R.string.create)) { _, _ ->
                 val name = normalizedTagName(input.text?.toString().orEmpty())
                 if (name.isEmpty()) {
-                    Toast.makeText(this, "Tag name cannot be empty", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.tag_name_empty), Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
                 }
                 val existing = libraryTags.firstOrNull { it.name.equals(name, ignoreCase = true) }
@@ -6940,10 +6988,10 @@ class MainActivity : Activity() {
                 persistBooks()
                 refreshLibraryUi()
                 if (existing != null) {
-                    Toast.makeText(this, "Existing tag assigned", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.existing_tag_assigned), Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
@@ -6954,15 +7002,15 @@ class MainActivity : Activity() {
         val tag = libraryTags.firstOrNull { it.id == tagId } ?: return
         val tagged = books.filter { tag.id in it.tagIds }
         val actions = arrayOf(
-            "Use only this tag on table",
-            "Add tag to table",
-            "Edit tagged items…",
-            "Rename tag",
-            "Delete tag",
-            "Forget tagged items…",
+            getString(R.string.use_only_tag_on_table),
+            getString(R.string.add_tag_to_table),
+            getString(R.string.edit_tagged_items),
+            getString(R.string.rename_tag),
+            getString(R.string.delete_tag),
+            getString(R.string.forget_tagged_items),
         )
         AlertDialog.Builder(this)
-            .setTitle("${tag.name} · ${tagged.size} item${if (tagged.size == 1) "" else "s"}")
+            .setTitle(getString(R.string.tag_item_count, tag.name, quantityString(R.plurals.item_count, tagged.size)))
             .setItems(actions) { _, which ->
                 when (which) {
                     0 -> updateTableFromLibraryItems(tagged, replace = true, label = tag.name)
@@ -6979,16 +7027,16 @@ class MainActivity : Activity() {
     private fun showUntaggedActions() {
         val untagged = books.filter { it.tagIds.isEmpty() }
         val actions = arrayOf(
-            "Use only untagged items on table",
-            "Add untagged items to table",
-            "Forget untagged items…",
+            getString(R.string.use_only_untagged_on_table),
+            getString(R.string.add_untagged_to_table),
+            getString(R.string.forget_untagged_items),
         )
         AlertDialog.Builder(this)
-            .setTitle("Untagged · ${untagged.size} item${if (untagged.size == 1) "" else "s"}")
+            .setTitle(getString(R.string.tag_item_count, getString(R.string.untagged), quantityString(R.plurals.item_count, untagged.size)))
             .setItems(actions) { _, which ->
                 when (which) {
-                    0 -> updateTableFromLibraryItems(untagged, replace = true, label = "Untagged")
-                    1 -> updateTableFromLibraryItems(untagged, replace = false, label = "Untagged")
+                    0 -> updateTableFromLibraryItems(untagged, replace = true, label = getString(R.string.untagged))
+                    1 -> updateTableFromLibraryItems(untagged, replace = false, label = getString(R.string.untagged))
                     2 -> confirmForgetLibraryItems(untagged, tag = null)
                 }
             }
@@ -6998,18 +7046,18 @@ class MainActivity : Activity() {
     private fun showTagMembershipEditor(tagId: String) {
         val tag = libraryTags.firstOrNull { it.id == tagId } ?: return
         if (books.isEmpty()) {
-            Toast.makeText(this, "The library is empty", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.the_library_is_empty), Toast.LENGTH_SHORT).show()
             return
         }
         val orderedBooks = books.sortedBy { it.fileName.lowercase(Locale.ROOT) }
         val checked = BooleanArray(orderedBooks.size) { index -> tag.id in orderedBooks[index].tagIds }
         AlertDialog.Builder(this)
-            .setTitle("Items tagged ${tag.name}")
+            .setTitle(getString(R.string.items_tagged, tag.name))
             .setMultiChoiceItems(
                 orderedBooks.map { it.fileName }.toTypedArray(),
                 checked,
             ) { _, which, selected -> checked[which] = selected }
-            .setPositiveButton("Save") { _, _ ->
+            .setPositiveButton(getString(R.string.save)) { _, _ ->
                 val includedIds = orderedBooks.indices
                     .filterTo(HashSet()) { checked[it] }
                     .mapTo(HashSet()) { orderedBooks[it].id }
@@ -7021,7 +7069,7 @@ class MainActivity : Activity() {
                 persistBooks()
                 refreshLibraryUi()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
@@ -7033,14 +7081,14 @@ class MainActivity : Activity() {
             selectAll()
         }
         AlertDialog.Builder(this)
-            .setTitle("Rename tag")
+            .setTitle(getString(R.string.rename_tag))
             .setView(input)
-            .setPositiveButton("Rename") { _, _ ->
+            .setPositiveButton(getString(R.string.rename)) { _, _ ->
                 val name = normalizedTagName(input.text?.toString().orEmpty())
                 when {
-                    name.isEmpty() -> Toast.makeText(this, "Tag name cannot be empty", Toast.LENGTH_SHORT).show()
+                    name.isEmpty() -> Toast.makeText(this, getString(R.string.tag_name_empty), Toast.LENGTH_SHORT).show()
                     libraryTags.any { it.id != tag.id && it.name.equals(name, ignoreCase = true) } ->
-                        Toast.makeText(this, "A tag with that name already exists", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, getString(R.string.tag_name_exists), Toast.LENGTH_SHORT).show()
                     else -> {
                         val index = libraryTags.indexOfFirst { it.id == tag.id }
                         if (index >= 0) libraryTags[index] = tag.copy(name = name)
@@ -7049,7 +7097,7 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
@@ -7057,12 +7105,11 @@ class MainActivity : Activity() {
         val tag = libraryTags.firstOrNull { it.id == tagId } ?: return
         val count = books.count { tag.id in it.tagIds }
         AlertDialog.Builder(this)
-            .setTitle("Delete tag ${tag.name}?")
+            .setTitle(getString(R.string.delete_tag_title, tag.name))
             .setMessage(
-                "The tag will be removed from $count item${if (count == 1) "" else "s"}. " +
-                    "Library items, table selection, tabs, and history will be kept.",
+                quantityString(R.plurals.delete_tag_message, count),
             )
-            .setPositiveButton("Delete tag") { _, _ ->
+            .setPositiveButton(getString(R.string.delete_tag)) { _, _ ->
                 libraryTags.removeAll { it.id == tag.id }
                 books.indices.forEach { index ->
                     val book = books[index]
@@ -7072,13 +7119,13 @@ class MainActivity : Activity() {
                 persistBooks()
                 refreshLibraryUi()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
     private fun confirmForgetLibraryItems(items: List<BookRecord>, tag: LibraryTagRecord?) {
         if (items.isEmpty()) {
-            Toast.makeText(this, "There are no matching library items", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.no_matching_items), Toast.LENGTH_SHORT).show()
             return
         }
         val targetIds = items.mapTo(HashSet()) { it.id }
@@ -7087,11 +7134,10 @@ class MainActivity : Activity() {
         }
         val message = buildString {
             append(
-                "NaIgre will permanently remove ${items.size} item${if (items.size == 1) "" else "s"}, " +
-                    "including their tabs, metadata, colors, tags, and visit history. Source files will not be deleted.",
+                quantityString(R.plurals.forget_items_message, items.size),
             )
             if (multipleTagged.isNotEmpty()) {
-                append("\n\nAlso tagged elsewhere and still forgotten:")
+                append(getString(R.string.forget_other_tags_warning))
                 multipleTagged.sortedBy { it.fileName.lowercase(Locale.ROOT) }.forEach { book ->
                     val otherTags = libraryTags
                         .filter { it.id in book.tagIds && it.id != tag?.id }
@@ -7103,13 +7149,13 @@ class MainActivity : Activity() {
         }
         AlertDialog.Builder(this)
             .setTitle(
-                if (tag == null) "Forget all untagged items?" else "Forget everything tagged ${tag.name}?",
+                if (tag == null) getString(R.string.forget_untagged_title) else getString(R.string.forget_tagged_title, tag.name),
             )
             .setMessage(message)
-            .setPositiveButton("Forget ${items.size}") { _, _ ->
+            .setPositiveButton(getString(R.string.forget_count_action, items.size)) { _, _ ->
                 forgetLibraryItems(targetIds, deleteTagId = tag?.id)
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
@@ -7120,7 +7166,7 @@ class MainActivity : Activity() {
     ) {
         if (!requireCatalogReady()) return
         if (items.isEmpty()) {
-            Toast.makeText(this, "There are no matching library items", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.no_matching_items), Toast.LENGTH_SHORT).show()
             return
         }
         val requestedIds = items.mapTo(HashSet()) { it.id }
@@ -7142,16 +7188,16 @@ class MainActivity : Activity() {
                 )
             }
         if (!membershipChanged && hydrationRequests.isEmpty()) {
-            Toast.makeText(this, "$label is already on the table", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.already_on_table, label), Toast.LENGTH_SHORT).show()
             return
         }
         if (hydrationRequests.isEmpty()) {
-            val action = if (replace) "Table now uses" else "Added to table:"
-            Toast.makeText(this, "$action $label", Toast.LENGTH_LONG).show()
+            val message = getString(if (replace) R.string.table_replaced else R.string.items_added_to_table, label)
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
             return
         }
 
-        setStatus("Preparing $label…")
+        setStatus(getString(R.string.preparing_table, label))
         libraryStorage.loadIndexes(hydrationRequests.map { it.first }) { results ->
             if (destroying || isDestroyed) return@loadIndexes
             val byBookId = results.associateBy { it.book.id }
@@ -7176,19 +7222,19 @@ class MainActivity : Activity() {
                         }
                     }
                     is BookIndexLoadResult.Missing -> {
-                        bookIndexLoadErrors[snapshot.id] = "Stored item index is missing"
+                        bookIndexLoadErrors[snapshot.id] = getString(R.string.index_missing)
                         failures += snapshot.fileName
                     }
                     is BookIndexLoadResult.Failed -> {
                         bookIndexLoadErrors[snapshot.id] =
-                            "Stored item index could not be read: ${result.message}"
+                            getString(R.string.index_unreadable, result.message)
                         failures += snapshot.fileName
                     }
                 }
             }
             if (tabs.isEmpty()) {
                 selectedBooks().firstOrNull { it.indexLoaded }?.let {
-                    tabs += ReaderTab(it.id, 0, "Start")
+                    tabs += ReaderTab.start(it.id)
                     activeTabIndex = 0
                     currentPage = 0
                 }
@@ -7203,13 +7249,13 @@ class MainActivity : Activity() {
             } else {
                 refreshLibraryUi()
             }
-            val action = if (replace) "Table now uses" else "Added to table:"
+            val message = getString(if (replace) R.string.table_replaced else R.string.items_added_to_table, label)
             val failureSuffix = if (failures.isEmpty()) {
                 ""
             } else {
-                " · ${failures.size} index load failure${if (failures.size == 1) "" else "s"}"
+                quantityString(R.plurals.index_load_failures, failures.size)
             }
-            Toast.makeText(this, "$action $label$failureSuffix", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, message + failureSuffix, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -7233,6 +7279,7 @@ class MainActivity : Activity() {
             if (libraryFilter.tagId == deleteTagId) libraryFilter = LibraryFilter(LibraryFilterKind.ALL)
         }
         forgotten.forEach { book ->
+            LibraryPreviewLoader.shared(this).forget(book.id)
             releaseExactPersistedPermission(book.uri)
             deleteAcceptedBookIndex(book.id, checkNotNull(deletionTokens[book.id]))
             deleteBookTextIndex(book.id)
@@ -7244,7 +7291,7 @@ class MainActivity : Activity() {
         refreshTextSearchScope()
         refreshLibraryUi()
         updateCachePins()
-        if (books.isEmpty()) setStatus("Library is empty")
+        if (books.isEmpty()) setStatus(getString(R.string.library_empty))
     }
 
     private fun withHydratedBook(bookId: String, action: (BookRecord) -> Unit) {
@@ -7254,7 +7301,7 @@ class MainActivity : Activity() {
             return
         }
         val contentToken = tableSessionController.captureContentOperation(bookId)
-        setStatus("Loading ${book.title} metadata…")
+        setStatus(getString(R.string.loading_item_metadata, book.title))
         loadIndexForContentOperation(book, contentToken, requireLoadedIndex = true) { hydrated ->
             val current = bookById(bookId) ?: return@loadIndexForContentOperation
             val merged = mergeHydratedBookIndex(current, hydrated)
@@ -7271,7 +7318,7 @@ class MainActivity : Activity() {
         }
         if (book.kind == LibraryItemKind.MARKDOWN) {
             if (pdfBookId == bookId && activeTabOrNull()?.bookId == bookId) {
-                setStatus("Refreshing ${book.title}…")
+                setStatus(getString(R.string.refreshing_item, book.title))
                 activateCurrentTab(
                     forceReload = true,
                     forceMetadataRefresh = true,
@@ -7283,7 +7330,7 @@ class MainActivity : Activity() {
             return
         }
         if (pdfBookId == bookId && activeTabOrNull()?.bookId == bookId) {
-            setStatus("Refreshing ${book.title}…")
+            setStatus(getString(R.string.refreshing_item, book.title))
             activateCurrentTab(
                 forceReload = true,
                 forceMetadataRefresh = true,
@@ -7304,7 +7351,7 @@ class MainActivity : Activity() {
     private fun refreshMarkdownBook(book: BookRecord) {
         val snapshot = bookById(book.id) ?: return
         val contentToken = tableSessionController.beginContentOperation(book.id)
-        setStatus("Refreshing ${snapshot.title}…")
+        setStatus(getString(R.string.refreshing_item, snapshot.title))
         loadIndexForContentOperation(snapshot, contentToken) { hydrated ->
             submitMaintenanceWork {
             var document: MarkdownDocument? = null
@@ -7361,7 +7408,7 @@ class MainActivity : Activity() {
                             ?: refreshedTab.pageIndex.coerceIn(0, accepted.pageCount - 1)
                         refreshedTab.originPageIndex = destination?.pageIndex
                             ?: refreshedTab.originPageIndex.coerceIn(0, accepted.pageCount - 1)
-                        if (destination != null) refreshedTab.label = destination.title
+                        if (destination != null) refreshedTab.setTextTitle(destination.title)
                     }
                     persistBooks()
                     rebuildBookmarkIndex()
@@ -7378,11 +7425,11 @@ class MainActivity : Activity() {
                     } else if (referenceLocation?.bookId == snapshot.id) {
                         renderReference()
                     }
-                    Toast.makeText(this, "${accepted.title} refreshed", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.item_refreshed, accepted.title), Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
                 if (tableSessionController.isContentOperationCurrent(contentToken)) {
-                    showError("Note refresh failed", t)
+                    showError(getString(R.string.note_refresh_failed), t)
                 }
             } finally {
                 document?.close()
@@ -7395,50 +7442,76 @@ class MainActivity : Activity() {
         val book = bookById(bookId) ?: return
         if (!isTextSearchable(book)) return
         scheduleBookTextIndex(book, force = true)
-        Toast.makeText(this, "Rebuilding text index for ${book.title}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, getString(R.string.rebuilding_text_index, book.title), Toast.LENGTH_SHORT).show()
         if (textSearchSession != null && bookId in selectedBookIds) refreshTextSearchResults()
     }
 
     private fun showBookColorDialog(bookId: String) {
         val book = bookById(bookId) ?: return
-        val selected = BOOK_COLORS.indexOf(book.color).coerceAtLeast(0)
+        val preset = BOOK_COLORS.indexOf(book.color)
+        val customLabel = if (preset < 0) getString(R.string.custom_color_value, RgbColor.format(book.color))
+            else getString(R.string.custom_color)
+        fun label(name: String, color: Int) = SpannableString("●  $name").apply {
+            setSpan(ForegroundColorSpan(color), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        val choices = BOOK_COLOR_NAMES.mapIndexed { index, nameRes ->
+            label(getString(nameRes), BOOK_COLORS[index])
+        } + label(customLabel, book.color)
         AlertDialog.Builder(this)
-            .setTitle("Color for ${book.title}")
-            .setSingleChoiceItems(
-                BOOK_COLOR_NAMES.mapIndexed { index, name ->
-                    SpannableString("●  $name").apply {
-                        setSpan(
-                            ForegroundColorSpan(BOOK_COLORS[index]),
-                            0,
-                            1,
-                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                        )
-                    }
-                }.toTypedArray(),
-                selected,
-            ) { dialog, which ->
-                val current = bookById(bookId) ?: return@setSingleChoiceItems
-                replaceBook(current.copy(color = BOOK_COLORS[which]))
-                persistBooks()
-                renderTabBar()
-                updateReferenceUi()
-                if (textSearchSession != null) textSearchResultAdapter.notifyDataSetChanged()
-                refreshLibraryUi()
+            .setTitle(getString(R.string.color_for_item, book.title))
+            .setSingleChoiceItems(choices.toTypedArray(), if (preset < 0) BOOK_COLORS.size else preset) { dialog, which ->
                 dialog.dismiss()
+                if (which == BOOK_COLORS.size) showCustomBookColorDialog(bookId)
+                else setBookColor(bookId, BOOK_COLORS[which])
             }
             .show()
+    }
+
+    private fun showCustomBookColorDialog(bookId: String) {
+        val book = bookById(bookId) ?: return
+        val picker = BookColorPicker(this, book.color, book.title, uiPalette) { color ->
+            controlBackground(tabBackgroundColor(color, active = true))
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.custom_color_title)
+            .setView(ScrollView(this).apply { addView(picker) })
+            .setPositiveButton(R.string.apply, null)
+            .setNegativeButton(R.string.cancel, null)
+            .create()
+        dialog.setOnShowListener {
+            val apply = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            apply.isEnabled = picker.color != null
+            picker.onValidityChanged = { apply.isEnabled = it }
+            apply.setOnClickListener {
+                val color = picker.color ?: return@setOnClickListener
+                setBookColor(bookId, color)
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun setBookColor(bookId: String, color: Int) {
+        val current = bookById(bookId) ?: return
+        val opaque = color or 0xff000000.toInt()
+        if (current.color == opaque) return
+        replaceBook(current.copy(color = opaque))
+        persistBooks()
+        renderTabBar()
+        updateReferenceUi()
+        if (textSearchSession != null) textSearchResultAdapter.notifyDataSetChanged()
+        refreshLibraryUi()
     }
 
     private fun confirmForgetBook(bookId: String) {
         val book = bookById(bookId) ?: return
         AlertDialog.Builder(this)
-            .setTitle("Forget ${book.title}?")
+            .setTitle(getString(R.string.forget_item_title, book.title))
             .setMessage(
-                "Source files are not deleted, but NaIgre will permanently remove this item's " +
-                    "tabs, metadata, color, and visit history.",
+                getString(R.string.forget_item_message),
             )
-            .setPositiveButton("Forget") { _, _ -> forgetBook(book) }
-            .setNegativeButton("Cancel", null)
+            .setPositiveButton(getString(R.string.forget)) { _, _ -> forgetBook(book) }
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
@@ -7447,111 +7520,117 @@ class MainActivity : Activity() {
     }
 
     private fun showReaderMenu() {
+        showMainMenu(MenuContext.READER)
+    }
+
+    private fun showMainMenu(context: MenuContext) {
         val currentBook = activeBook()
-        val readingSummary = when (currentBook?.kind) {
-            LibraryItemKind.PDF -> "${if (spreadMode) "Spread" else "Single"}, ${pageTurnMode.label}"
-            LibraryItemKind.MARKDOWN -> "Continuous text"
-            else -> pageTurnMode.label
+        val readingSummary = when (if (context == MenuContext.LIBRARY) LibraryItemKind.PDF else currentBook?.kind) {
+            LibraryItemKind.PDF -> getString(R.string.reading_pdf_summary, getString(if (spreadMode) R.string.spread else R.string.single_page), getString(pageTurnMode.labelRes))
+            LibraryItemKind.MARKDOWN -> getString(R.string.continuous_text)
+            else -> getString(pageTurnMode.labelRes)
         }
         val actions = mutableListOf<Pair<String, () -> Unit>>()
-        actions += "Reading view · $readingSummary" to { showReadingViewMenu() }
-        actions += "Interface · ${themeMode.label}, ${readerLayoutMode.label}" to { showInterfaceMenu() }
-        currentBook?.takeIf { it.kind != LibraryItemKind.IMAGE_COLLECTION }?.let { book ->
-            actions += "Current book · ${book.fileName}" to { showCurrentBookMenu(book.id) }
+        actions += getString(R.string.reading_view_summary, readingSummary) to { showReadingViewMenu(context) }
+        actions += getString(R.string.interface_summary, getString(themeMode.labelRes), getString(readerLayoutMode.labelRes)) to { showInterfaceMenu(context) }
+        if (context == MenuContext.READER) {
+            currentBook?.takeIf { it.kind != LibraryItemKind.IMAGE_COLLECTION }?.let { book ->
+                actions += getString(R.string.current_book_title, book.fileName) to { showCurrentBookMenu(book.id) }
+            }
+            actions += getString(R.string.library_menu_summary, selectedBookIds.size, books.size) to { showLibraryMenu() }
         }
-        actions += "Library · ${selectedBookIds.size}/${books.size} on table" to { showLibraryMenu() }
-        actions += "Diagnostics · ${appVersionLabel()}" to { showDiagnostics() }
+        actions += getString(R.string.diagnostics_title, appVersionLabel()) to { showDiagnostics() }
         showReaderActionList(actions)
     }
 
     private fun showLibraryMenu() {
         val actions = mutableListOf<Pair<String, () -> Unit>>()
         if (!catalogReady()) {
-            actions += "Retry library load" to { loadLibraryCatalog() }
-            actions += "Diagnostics" to { showDiagnostics() }
-            showReaderActionList(actions, title = "Library", returnToMainOnCancel = true)
+            actions += getString(R.string.retry_library_load) to { loadLibraryCatalog() }
+            actions += getString(R.string.diagnostics) to { showDiagnostics() }
+            showReaderActionList(actions, title = getString(R.string.library), onCancel = ::showReaderMenu)
             return
         }
-        actions += "Open library" to { showLibrary() }
-        actions += "Add file" to { chooseLibraryDocument() }
-        actions += "Add folder" to { chooseLibraryFolder() }
+        actions += getString(R.string.open_library) to { showLibrary() }
+        actions += getString(R.string.add_file) to { chooseLibraryDocument() }
+        actions += getString(R.string.add_folder) to { chooseLibraryFolder() }
         if (libraryFolders.isNotEmpty()) {
-            actions += "Rescan folders · ${libraryFolders.size}" to { rescanLibraryFolders() }
+            actions += getString(R.string.rescan_folders_action, libraryFolders.size) to { rescanLibraryFolders() }
         }
-        showReaderActionList(actions, title = "Library", returnToMainOnCancel = true)
+        showReaderActionList(actions, title = getString(R.string.library), onCancel = ::showReaderMenu)
     }
 
-    private fun showReadingViewMenu() {
+    private fun showReadingViewMenu(context: MenuContext) {
         val currentBook = activeBook()
         val actions = mutableListOf<Pair<String, () -> Unit>>()
-        if (currentBook?.kind == LibraryItemKind.PDF) {
-            actions += "Page layout · ${if (spreadMode) "Spread" else "Single"}" to {
+        if (context == MenuContext.LIBRARY || currentBook?.kind == LibraryItemKind.PDF) {
+            actions += getString(R.string.page_layout_summary, getString(if (spreadMode) R.string.spread else R.string.single_page)) to {
                 setSpread(!spreadMode)
             }
-            actions += "Skip cover in spreads · ${if (spreadSkipCover) "On" else "Off"}" to {
+            actions += getString(R.string.skip_cover_summary, getString(if (spreadSkipCover) R.string.on else R.string.off)) to {
                 setSpreadSkipCover(!spreadSkipCover)
             }
         }
-        if (currentBook?.kind != LibraryItemKind.MARKDOWN) {
-            actions += "Page turns · ${pageTurnMode.label}" to { showPageTurnModeDialog() }
+        if (context == MenuContext.LIBRARY || currentBook?.kind != LibraryItemKind.MARKDOWN) {
+            actions += getString(R.string.page_turn_summary, getString(pageTurnMode.labelRes)) to { showPageTurnModeDialog() }
         }
-        if (currentBook != null && currentBook.kind != LibraryItemKind.MARKDOWN) {
-            actions += "Reset zoom" to {
+        if (context == MenuContext.READER && currentBook != null && currentBook.kind != LibraryItemKind.MARKDOWN) {
+            actions += getString(R.string.reset_zoom) to {
                 clearCurrentImageViewports()
                 readerSurface.resetTransform()
                 referenceSurface.resetTransform()
             }
         }
-        showReaderActionList(actions, title = "Reading view", returnToMainOnCancel = true)
+        showReaderActionList(actions, title = getString(R.string.reading_view), onCancel = { showMainMenu(context) })
     }
 
-    private fun showInterfaceMenu() {
+    private fun showInterfaceMenu(context: MenuContext) {
         val actions = listOf<Pair<String, () -> Unit>>(
-            "Theme · ${themeMode.label}" to { showThemeDialog() },
-            "Reader layout · ${readerLayoutMode.label}" to { showReaderLayoutDialog() },
-            "Fullscreen + above lock screen · ${if (immersive) "On" else "Off"}" to {
+            getString(R.string.theme_summary, getString(themeMode.labelRes)) to { showThemeDialog() },
+            getString(R.string.layout_summary, getString(readerLayoutMode.labelRes)) to { showReaderLayoutDialog() },
+            getString(R.string.fullscreen_summary, getString(if (immersive) R.string.on else R.string.off)) to {
                 applyImmersiveMode(!immersive)
             },
         )
-        showReaderActionList(actions, title = "Interface", returnToMainOnCancel = true)
+        showReaderActionList(actions, title = getString(R.string.interface_menu), onCancel = { showMainMenu(context) })
     }
 
     private fun showCurrentBookMenu(bookId: String) {
         val book = bookById(bookId)?.takeIf { it.kind != LibraryItemKind.IMAGE_COLLECTION } ?: return
         val actions = if (book.kind == LibraryItemKind.PDF) {
             listOf<Pair<String, () -> Unit>>(
-                (if (book.externalTocLabel == null) "Import TXT TOC" else "Replace TXT TOC") to {
+                (if (book.externalTocLabel == null) getString(R.string.import_txt_toc) else getString(R.string.replace_txt_toc)) to {
                     withHydratedBook(book.id) { chooseExternalToc(it.id) }
                 },
-                "Refresh PDF" to { refreshLibraryBook(book.id) },
-                "Rebuild text index" to { rebuildBookTextIndex(book.id) },
-                "Relink/replace PDF" to { chooseRelinkSource(book.id) },
+                getString(R.string.refresh_pdf) to { refreshLibraryBook(book.id) },
+                getString(R.string.rebuild_text_index) to { rebuildBookTextIndex(book.id) },
+                getString(R.string.relink_pdf) to { chooseRelinkSource(book.id) },
             )
         } else {
             listOf(
-                "Refresh note" to { refreshLibraryBook(book.id) },
-                "Rebuild text index" to { rebuildBookTextIndex(book.id) },
-                "Relink/replace note" to { chooseRelinkSource(book.id) },
+                getString(R.string.refresh_note) to { refreshLibraryBook(book.id) },
+                getString(R.string.rebuild_text_index) to { rebuildBookTextIndex(book.id) },
+                getString(R.string.relink_note) to { chooseRelinkSource(book.id) },
             )
         }
         showReaderActionList(
             actions,
-            title = "Current book · ${book.fileName}",
-            returnToMainOnCancel = true,
+            title = getString(R.string.current_book_title, book.fileName),
+            onCancel = ::showReaderMenu,
         )
     }
 
     private fun showReaderActionList(
         actions: List<Pair<String, () -> Unit>>,
         title: String? = null,
-        returnToMainOnCancel: Boolean = false,
+        onCancel: (() -> Unit)? = null,
     ) {
         val builder = AlertDialog.Builder(this)
         if (title != null) builder.setTitle(title)
         builder.setItems(actions.map { it.first }.toTypedArray()) { _, which ->
             actions.getOrNull(which)?.second?.invoke()
         }
-        if (returnToMainOnCancel) builder.setOnCancelListener { showReaderMenu() }
+        if (onCancel != null) builder.setOnCancelListener { onCancel() }
         builder.show()
     }
 
@@ -7577,8 +7656,8 @@ class MainActivity : Activity() {
         val modes = PageTurnMode.entries
         val selected = modes.indexOf(pageTurnMode)
         AlertDialog.Builder(this)
-            .setTitle("Page turning")
-            .setSingleChoiceItems(modes.map { it.label }.toTypedArray(), selected) { dialog, which ->
+            .setTitle(getString(R.string.page_turning))
+            .setSingleChoiceItems(modes.map { getString(it.labelRes) }.toTypedArray(), selected) { dialog, which ->
                 pageTurnMode = modes[which]
                 readerSurface.pageTurnMode = pageTurnMode
                 referenceSurface.pageTurnMode = pageTurnMode
@@ -7592,8 +7671,8 @@ class MainActivity : Activity() {
         val modes = ReaderThemeMode.entries
         val selected = modes.indexOf(themeMode)
         AlertDialog.Builder(this)
-            .setTitle("Theme")
-            .setSingleChoiceItems(modes.map { it.label }.toTypedArray(), selected) { dialog, which ->
+            .setTitle(getString(R.string.theme))
+            .setSingleChoiceItems(modes.map { getString(it.labelRes) }.toTypedArray(), selected) { dialog, which ->
                 val next = modes[which]
                 dialog.dismiss()
                 if (next == themeMode) return@setSingleChoiceItems
@@ -7612,8 +7691,8 @@ class MainActivity : Activity() {
         val modes = ReaderLayoutMode.entries
         val selected = modes.indexOf(readerLayoutMode)
         AlertDialog.Builder(this)
-            .setTitle("Reader layout")
-            .setSingleChoiceItems(modes.map { it.label }.toTypedArray(), selected) { dialog, which ->
+            .setTitle(getString(R.string.reader_layout))
+            .setSingleChoiceItems(modes.map { getString(it.labelRes) }.toTypedArray(), selected) { dialog, which ->
                 dialog.dismiss()
                 setReaderLayoutMode(modes[which])
             }
@@ -7624,6 +7703,7 @@ class MainActivity : Activity() {
         immersive = enabled
         applyShowWhenLocked(enabled)
         applyImmersiveToWindow(window, enabled)
+        libraryDialog?.window?.let { applyImmersiveToWindow(it, enabled) }
     }
 
     private fun applyShowWhenLocked(enabled: Boolean) {
@@ -7716,7 +7796,7 @@ class MainActivity : Activity() {
                 append("\nLast storage issue: ${failure.operation.label} · ${failure.message}")
             }
             append("\nStorage status: $lastStorageDiagnostic")
-            append("\nTheme: ${themeMode.label} → ${if (uiPalette.isDark) "Dark" else "Light"}")
+            append("\nTheme: ${getString(themeMode.labelRes)} → ${if (uiPalette.isDark) "Dark" else "Light"}")
             append("\nIndexed bookmarks: ${bookmarkIndex.size}")
             append("\nText index: %.1f MB".format(textSearchIndex.databaseBytes() / (1024.0 * 1024.0)))
             append("\nText indexing jobs: ${textIndexCoordinator.activeJobCount()}")
@@ -7731,7 +7811,7 @@ class MainActivity : Activity() {
                 if (indexFailures.size > 5) append("\n• ${indexFailures.size - 5} more")
             }
             append("\nTabs: ${tabs.size}")
-            append("\nLayout: ${readerLayoutMode.label} → ${resolvedReaderLayout().label}")
+            append("\nLayout: ${getString(readerLayoutMode.labelRes)} → ${getString(resolvedReaderLayout().labelRes)}")
             append("\nDevice memory class: $deviceMemoryClassMb MB")
             if (lowRamDevice) append(" · low-RAM")
             append("\nImage decode ceiling: %.1f MP / %.0f MB".format(
@@ -7756,7 +7836,7 @@ class MainActivity : Activity() {
             textSearchSession?.let { search ->
                 append("\nSearch reference: “${search.query}” · ${search.results.size}/${search.totalMatches} shown")
                 append(" · ${search.indexedPages}/${search.totalPages} parts")
-                append(" · scope ${search.scopeBookId?.let { bookById(it)?.title } ?: "All"}")
+                append(" · scope ${search.scopeBookId?.let { bookById(it)?.title } ?: getString(R.string.all)}")
             }
             append("\nLast text search: $lastTextSearchDiagnostic")
             if (document != null) {
@@ -7766,14 +7846,14 @@ class MainActivity : Activity() {
                 }
                 append("\nSpread: $spreadMode")
                 append("\nSkip cover: $spreadSkipCover")
-                append("\nPage turns: ${pageTurnMode.label}")
+                append("\nPage turns: ${getString(pageTurnMode.labelRes)}")
                 append("\nCache: ${pageCache.size()} pages / %.0f of %.0f MB".format(
                     pageCache.bytes() / (1024.0 * 1024.0),
                     pageCache.capacityBytes() / (1024.0 * 1024.0),
                 ))
                 listOf(
                     "Primary" to primaryDisplayedPageKeys,
-                    "Reference" to referenceDisplayedPageKeys,
+                    getString(R.string.reference) to referenceDisplayedPageKeys,
                 ).forEach { (label, keys) ->
                     val key = keys.singleOrNull() ?: return@forEach
                     if (bookById(key.bookId)?.kind != LibraryItemKind.IMAGE_COLLECTION) return@forEach
@@ -7788,11 +7868,11 @@ class MainActivity : Activity() {
             append("\n\nLast link: $lastLinkDiagnostic")
         }
         val builder = AlertDialog.Builder(this)
-            .setTitle("Diagnostics · $version")
+            .setTitle(getString(R.string.diagnostics_title, version))
             .setMessage(message)
-            .setPositiveButton("Close", null)
+            .setPositiveButton(getString(R.string.close), null)
         if (document != null && activeBook()?.kind == LibraryItemKind.PDF) {
-            builder.setNeutralButton("Annotations") { _, _ -> inspectAnnotations() }
+            builder.setNeutralButton(getString(R.string.annotations)) { _, _ -> inspectAnnotations() }
         }
         val dialog = builder.show()
         dialog.findViewById<TextView>(android.R.id.message)?.setTextIsSelectable(true)
@@ -7862,14 +7942,19 @@ class MainActivity : Activity() {
         lastStatus = message
     }
 
+    private fun errorDescription(throwable: Throwable): String = when (throwable) {
+        is DocumentReadException -> getString(throwable.problem.messageRes)
+        else -> throwable.message ?: throwable.javaClass.simpleName
+    }
+
     private fun showError(title: String, throwable: Throwable) {
         if (throwable.message == "Document changed during render") return
         mainHandler.post {
             if (isDestroyed) return@post
             AlertDialog.Builder(this)
                 .setTitle(title)
-                .setMessage(throwable.message ?: throwable.javaClass.simpleName)
-                .setPositiveButton("Close", null)
+                .setMessage(errorDescription(throwable))
+                .setPositiveButton(getString(R.string.close), null)
                 .show()
             setStatus("$title: ${throwable.message ?: throwable.javaClass.simpleName}")
         }

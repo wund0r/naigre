@@ -1,13 +1,170 @@
 # Testing NaIgre
 
-## Current release candidate: 26.09.0 (63)
+## Release candidate 26.09.1 (64) — 2026-09-23
+
+- Includes Russian localization, library settings/tag grouping, compact document
+  previews and custom book colors. Version advanced from the published 26.09.0
+  (63); the old release assets were not replaced.
+- `preparePublicRelease` passed: signed universal APK, public package
+  `wund0r.naigre.reader`, launcher label NaIgre in both languages, non-debuggable,
+  verified APK signature and ZIP/native-library packaging alignment. Its signing
+  certificate matches the original 26.09.0 APK.
+- Forced a fresh JVM run: 39 tests passed. Release lint passed with 0 errors and
+  13 existing warnings. The resolved runtime dependency graph still matches NOTICE;
+  no new runtime libraries or source-archive downloads were introduced.
+- The feature code previously passed 44 connected checks on Android 12 and 45 on
+  Android 16, as recorded below. Those were verification builds, not signed-release
+  acceptance. Connected tests were deliberately not rerun during release preparation,
+  so the installed verification apps and their manual setup remain untouched.
+- Candidate outputs: `build/public-release/26.09.1/` (APK, checksum, release-info,
+  LICENSE, NOTICE and dependency notices). Release-note draft: `releases/26.09.1.md`.
+- Pending: smoke-test the actual signed APK, including a 26.09.0 → 26.09.1 update
+  without uninstalling, real-campaign Russian/preview/color acceptance, then commit
+  the intended source and rebuild from the clean revision. Confirm
+  `Uncommitted changes: false` before tagging/uploading. Obtainium update delivery
+  remains a post-publication check.
+- No apps were installed, removed or reset during this preparation. No commit,
+  tag, push or GitHub release was created. The current APK is a dirty-tree candidate,
+  not the final clean-source publication artifact.
+
+## Custom book colors — 2026-09-23 (unreleased)
+
+- Book menu → Choose color retains eight presets and adds Custom. A saved custom
+  color gets its own checked row and hex value instead of marking the first preset.
+- The picker keeps changes local until Apply, supports exact opaque RGB hex input
+  and accessible native hue/saturation/brightness sliders, and previews both the
+  raw swatch and the actual selected-tab tint. Invalid input disables Apply.
+- Device checks cover Cancel, Apply, persistence through Activity recreation,
+  switching back to a preset, slider/hex synchronization, and unchanged text-index
+  run/preview cache identity. Narrow 280 dp picker bodies and English/Russian
+  labels were checked at font scales 1.0/1.3 in light/dark themes.
+- Verification: 39 JVM tests passed; 44 device tests passed on Android 12 and
+  45 on Android 16. Debug build and lint passed (0 errors, 13 existing warnings).
+- NaIgre Verification is left installed on both test devices for manual review.
+  It remains a separate, disposable test package; debug/public apps are untouched.
+  Do not rerun connected tests against a manually populated verification library
+  without arranging to preserve it first: the test workflow can remove that app.
+
+## Uniform library cards and previews — 2026-09-23 (unreleased)
+
+- Recycled cards use a fixed 72×108 dp preview at the left and consistent reserved
+  text/control rows on the right. Height is shared across items and accounts for
+  system font metrics. Missing previews, long names, tags and source errors do not
+  resize individual cards. Reviewed light/dark and enlarged Russian text captures.
+- Preview work uses one dedicated background worker, separate from reader lanes;
+  detached/rebound cards cancel their subscriptions. PDFs render only the first
+  page without extracting link metadata; albums decode only the first image at a
+  thumbnail pixel budget. Markdown uses up to four stored headings, not a new parse
+  or text-index job. Images are fit without cropping or stretching.
+- Cache bounds: 192×288 px per bitmap, 4 MiB memory, 32 MiB/256 files on disk.
+  Cache identity follows catalog source stamps/revision tokens, independent of
+  index hydration, tags and colors. Forget clears all cached revisions.
+- 36 JVM tests passed. Connected verification: 42 tests passed on Android 12 and
+  43 on Android 16. New checks cover tall PDF/wide image bounds, disk reuse after
+  source removal, source revision invalidation, lazy heading loading, cancelled
+  subscriptions, forgetting cached revisions, uniform geometry and text clipping.
+- Debug build and lint passed (0 errors, 13 existing warnings). Only synthetic
+  fixture files and the disposable verification app were used. The newly built
+  debug APK has not replaced the tablet's previously installed debug build.
+
+## Library filter/tag grouping — 2026-09-23 (unreleased)
+
+- Built-in filters come first, then a neutral divider and custom tags with outline
+  icons. No divider is shown without custom tags. No tag data or book colors changed.
+- Checked English/Russian, light/dark and narrow/wide captures, including scrolling
+  to a selected tag. Buttons retain padding, height and selected styling; custom
+  tag and Untagged long-press menus still work, as do their filters.
+- Debug build, 34 JVM tests and lint passed. Connected verification: 37 tests
+  passed on Android 12 and 38 on Android 16. Only the disposable verification app
+  was installed; public NaIgre was not changed.
+
+## Library settings menu — 2026-09-23 (unreleased)
+
+- Added the top-left Library menu; checked its three sections and Back navigation
+  with a Markdown book active and with an empty library. Reading preferences do
+  not depend on the reader behind the Library; Reset zoom remains reader-only.
+- Verified a real theme-change recreation preserves the open Library, selected
+  tag and fullscreen state. Toggling fullscreen updates status/navigation bars
+  in both Library and reader; Read still closes Library normally.
+- Reviewed English/Russian header captures at 360/740 dp and font scales 1.0/1.3.
+  Menu keeps its 48 dp target. Import buttons wrap when needed; at larger text
+  sizes Read can share their row so the Library title remains readable.
+- Debug build, 34 JVM tests and lint passed (0 errors, 13 existing warnings).
+  Connected verification: 36 tests passed on Android 12, 37 on Android 16.
+- Updated the stale Russian Navigate-label expectation to the existing
+  `Закладки` wording. Test fixtures accept an initialized empty catalog but still
+  refuse populated/unreadable verification libraries. System-bar assertions
+  check status/navigation bars, not the absent desktop caption bar.
+- Tests touched only the disposable verification app. No public app install,
+  version bump, signing or release publishing was performed.
+
+## Localization layout/lifecycle pass — 2026-09-23 (unreleased, stage 3)
+
+- Fixed Russian Library-header overflow, reference Edit-label clipping, and search
+  mode padding. Text controls retain minimum sizes but can expand; search counts
+  remain in the status row instead of duplicating them in the reference header.
+- Verification JVM tests: 34 passed. Debug build and lint passed (0 errors,
+  13 warnings, unchanged from stage 2).
+- Connected tests: 34 passed on Samsung SM-T860 / Android 12; 35 passed on Motorola
+  Razr 50 Ultra / Android 16. The extra phone test exercises native per-app locale
+  changes in both directions, checking saved state and no text-index rebuild.
+- Reviewed screenshot captures at 360/740 dp, English/Russian, light/dark themes
+  and font scales 1.0/1.3. Covered Library, Navigate/Full text, Tall/Wide search
+  references, layout choices and a cancelled forget confirmation. A generated
+  Cyrillic PDF also rendered and yielded searchable text through MuPDF/SQLite.
+- Initial tests caught the Russian Library title being squeezed into a vertical
+  column and the phone's enlarged Edit label wrapping/clipping; those cases now pass.
+  An initial phone lifecycle run failed while the screen slept. The phone was
+  unlocked and test-only windows now stay awake; subsequent full runs passed.
+- Android's native app-language picker visibly lists English/Russian. Only
+  `wund0r.naigre.reader.verification` was installed/changed; its language was
+  restored to System default after inspection. The empty verification app remains
+  installed on the phone. Public NaIgre and its library were not touched.
+- No system language, density, orientation or font settings were changed. No
+  signed release was rebuilt. Physical rotation/fold-state and real-campaign
+  wording acceptance remain owner checks; see [LOCALIZATION.md](LOCALIZATION.md).
+
+## Russian localization — 2026-09-23 (unreleased, stage 2)
+
+- Translated all 308 translatable strings and 31 plural resources; registered
+  English/Russian for Android 13+ per-app language settings. Android 12 and earlier
+  continue to follow device language.
+- Verification JVM tests: 34 passed, including resource coverage/placeholder checks
+  and Cyrillic navigation smartcase. Debug APK built successfully.
+- Debug lint: 0 errors, 13 warnings. The additional warning is the intentional
+  API 33-only `localeConfig` attribute, which older Android versions ignore.
+- Connected verification tests: 29 passed on Samsung SM-T860, Android 12, including
+  Russian plural/format/fallback checks and SQLite Cyrillic case-folding, phrase
+  and prefix search.
+- Locale resource checks used scoped configuration contexts: no device language
+  or public-app setting/data was changed. Tests installed only the disposable
+  verification app; no public APK was installed or signed release rebuilt.
+- Still pending: human terminology/layout review, actual language-switch Activity
+  recreation and the Android 13+ system language picker. See stage 3 in
+  [LOCALIZATION.md](LOCALIZATION.md). No UI layout changes were made in stage 2.
+
+## Localization groundwork — 2026-09-23 (unreleased)
+
+- English resource extraction and typed generated-tab titles; Russian is not enabled.
+- Verification JVM tests: 27 passed. Debug build and lint passed.
+- Connected verification tests: 25 passed on Samsung SM-T860, Android 12, including
+  English plural/format checks and saved-tab compatibility checks.
+- Tests installed only the disposable verification app. The public reader and its
+  library were not replaced or reset. No signed release APK was rebuilt.
+- Translation/layout review and a manual document-reading smoke test remain separate
+  from these automated checks. See [LOCALIZATION.md](LOCALIZATION.md).
+
+## Release acceptance and historical preparation
 
 Build results do not substitute for device acceptance. Record the date, device,
 Android version, source revision and cold/warm index/cache conditions alongside results.
-No connected tablet was visible during initial release preparation; do not assume
-the device checklist has passed.
+Use the checklist below for the current **26.09.1 (64)** candidate. The first-release
+preparation record is retained as history and is not a current acceptance result.
 
-### Preparation results — 2026-09-22
+### Historical 26.09.0 (63) preparation — 2026-09-22
+
+No connected tablet was visible during this initial preparation. The owner later
+reported successful initial testing; 26.09.0 was published on 2026-09-23.
 
 - Fresh `testVerificationUnitTest` run: 23 tests, 0 failures/errors/skips.
 - Debug and release lint: 0 errors, 37 warnings each; warnings remain outside this release-preparation change.
@@ -25,7 +182,7 @@ the device checklist has passed.
 - Runtime dependency versions reviewed; repository notices expanded for MuPDF's
   embedded libraries/data and Kotlin's third-party code. Exact upstream source
   links are retained in NOTICE; no source-download/build automation is required.
-- Pending: device/instrumentation acceptance, real release-to-release update,
+- Pending at the time of this preparation: device/instrumentation acceptance, real release-to-release update,
   Obtainium installation/update, independent key backup verification, clean tagged
   source and the final corresponding-source/native-notice handoff before publication.
 - No APK was installed, no user data was reset, and no tag/release was published.

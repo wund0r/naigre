@@ -6,10 +6,10 @@ import android.content.Context
 import android.content.res.Configuration
 import wund0r.naigre.reader.R
 
-enum class ReaderThemeMode(val label: String) {
-    DARK("Dark"),
-    LIGHT("Light"),
-    SYSTEM("System");
+enum class ReaderThemeMode(val labelRes: Int) {
+    DARK(R.string.theme_dark),
+    LIGHT(R.string.theme_light),
+    SYSTEM(R.string.theme_system);
 
     companion object {
         fun fromStored(value: String?): ReaderThemeMode =

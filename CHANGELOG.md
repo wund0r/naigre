@@ -1,6 +1,19 @@
 # NaIgre changelog
 
-## v26.09.0 — public beta candidate (not yet published)
+## v26.09.1 — UI and languages (release candidate, not yet published)
+
+- Books support custom opaque colors alongside the existing eight presets. The color picker provides hue/saturation/brightness sliders, optional exact `#RRGGBB` input, and live swatch/selected-tab previews. Apply saves the color across library, tabs and search without rebuilding previews or text indexes; Cancel discards the draft. English and Russian labels are included.
+- Library cards now use a uniform compact layout: fixed portrait preview on the left, filename/tags/metadata and controls on the right. PDFs show their first page, albums their first image, and Markdown notes up to four stored headings. Previews preserve image proportions, load lazily on a dedicated background worker, and use bounded memory/disk caches; source refreshes invalidate them and forgetting an item clears its previews. Card views are recycled, and missing previews/errors never change card size.
+- Grouped the Library's built-in filters (All, On table, Untagged) before custom tags. A neutral divider and outline tag icons distinguish custom tags without introducing another color system; selection and long-press actions are unchanged.
+- Added a top-left Library menu with shared Reading view, Interface and Diagnostics settings. Library reading preferences are available even without an open book; reader-only actions stay in the reader. Theme changes preserve the open Library and tag filter, and fullscreen applies to both Library and reader windows.
+- Moved English controls, menus, confirmations, accessibility descriptions and expected document errors into Android string resources. Count-based messages now use plural resources.
+- Library actions no longer depend on displayed English labels. Newly generated tab titles retain their meaning and destination separately from displayed text; existing saved titles, document titles and visit identities are preserved.
+- Added Russian translations, including count-dependent forms and accessibility descriptions. Document content, filenames, tags, search terms and branding remain unchanged; technical diagnostics remain English.
+- Registered English and Russian for Android 13+ system per-app language settings. Earlier Android versions follow device language; no in-app picker was added.
+- Fixed translated/large-text layouts: the Library header uses two rows when needed; search modes, All filters and reference Edit retain padding and can grow to fit. Search result counts remain in the status row rather than crowding the query header.
+- Added tab-state round-trip, translation coverage, English/Russian resource-format and Cyrillic navigation/full-text search checks. Verified layouts and Activity recreation on Android 12/16, native per-app language switching on Android 16, and Cyrillic PDF rendering/extraction. Real-campaign wording review remains part of release acceptance.
+
+## v26.09.0 — first public beta (2026-09-23)
 
 - Restored 12 dp left/right padding for book selectors in the search overlay and search reference pane.
 - First public-release preparation using `YY.MM.PATCH` calendar versions. Earlier prototype entries below retain their original version numbers.

@@ -1,4 +1,457 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">NaIgre</string>
+<resources xmlns:tools="http://schemas.android.com/tools">
+  <string name="app_name" translatable="false">NaIgre</string>
+  <string name="pdf_preview_placeholder" translatable="false">PDF</string>
+
+  <!-- English defaults. Keep user content and diagnostic details outside this catalog. -->
+  <string name="show_more">"Show more"</string>
+  <string name="close">"Close"</string>
+  <string name="cancel">"Cancel"</string>
+  <string name="retry">"Retry"</string>
+  <string name="relink">"Relink"</string>
+  <string name="rescan">"Rescan"</string>
+  <string name="library">"Library"</string>
+  <string name="library_menu_description">"Library menu"</string>
+  <string name="diagnostics">"Diagnostics"</string>
+  <string name="edit">"Edit"</string>
+  <string name="close_reference">"Close reference"</string>
+  <string name="close_others">"Close others"</string>
+  <string name="reference">"Reference"</string>
+  <string name="all">"All"</string>
+  <string name="navigate">"Navigate"</string>
+  <string name="full_text">"Full text"</string>
+  <string name="failed">"Failed"</string>
+  <string name="searching">"Searching…"</string>
+  <string name="add_file">"Add file"</string>
+  <string name="add_folder">"Add folder"</string>
+  <string name="read">"Read"</string>
+  <string name="on_table">"On table"</string>
+  <string name="in_library">"In library"</string>
+  <string name="untagged">"Untagged"</string>
+  <string name="take_off_table">"Take off table"</string>
+  <string name="import_txt_toc">"Import txt TOC"</string>
+  <string name="replace_txt_toc">"Replace txt TOC"</string>
+  <string name="refresh_pdf">"Refresh PDF"</string>
+  <string name="refresh_note">"Refresh note"</string>
+  <string name="rebuild_text_index">"Rebuild text index"</string>
+  <string name="relink_pdf">"Relink/replace PDF"</string>
+  <string name="relink_note">"Relink/replace note"</string>
+  <string name="save">"Save"</string>
+  <string name="new_tag">"New tag"</string>
+  <string name="tag_name">"Tag name"</string>
+  <string name="new_library_tag">"New library tag"</string>
+  <string name="create">"Create"</string>
+  <string name="rename_tag">"Rename tag"</string>
+  <string name="rename">"Rename"</string>
+  <string name="delete_tag">"Delete tag"</string>
+  <string name="forget">"Forget"</string>
+  <string name="reading_view">"Reading view"</string>
+  <string name="interface_menu">"Interface"</string>
+  <string name="theme">"Theme"</string>
+  <string name="reader_layout">"Reader layout"</string>
+  <string name="page_turning">"Page turning"</string>
+  <string name="reset_zoom">"Reset zoom"</string>
+  <string name="retry_library">"Retry library"</string>
+  <string name="retry_library_load">"Retry library load"</string>
+  <string name="open_library">"Open library"</string>
+  <string name="go_to_page">"Go to page"</string>
+  <string name="go">"Go"</string>
+  <string name="annotations">"Annotations"</string>
+  <string name="annotation_diagnostics">"Annotation diagnostics"</string>
+  <string name="continuous_text">"Continuous text"</string>
+  <string name="spread">"Spread"</string>
+  <string name="single_page">"Single"</string>
+  <string name="on">"On"</string>
+  <string name="off">"Off"</string>
+  <string name="note">"Note"</string>
+  <string name="page">"Page"</string>
+  <string name="image">"Image"</string>
+  <string name="open">"Open"</string>
+  <string name="put_on_table_and_open">"Put on table and open"</string>
+  <string name="tags">"Tags…"</string>
+  <string name="remove_txt_toc">"Remove TXT TOC"</string>
+  <string name="choose_color">"Choose color"</string>
+  <string name="custom_color">"Custom…"</string>
+  <string name="custom_color_value">"Custom · %1$s"</string>
+  <string name="custom_color_title">"Custom color"</string>
+  <string name="apply">"Apply"</string>
+  <string name="color_hex_label">"Hex color (#RRGGBB)"</string>
+  <string name="color_hex_error">"Enter six hexadecimal digits, e.g. #79A7D3."</string>
+  <string name="color_hue">"Hue"</string>
+  <string name="color_saturation">"Saturation"</string>
+  <string name="color_brightness">"Brightness"</string>
+  <string name="color_tab_preview">"Selected tab color preview"</string>
+  <string name="rescan_source_folder">"Rescan source folder"</string>
+  <string name="forget_item_and_history">"Forget item and history"</string>
+  <string name="tab_start">"Start"</string>
+  <string name="location_start">"start"</string>
+  <string name="theme_dark">"Dark"</string>
+  <string name="theme_light">"Light"</string>
+  <string name="theme_system">"System"</string>
+  <string name="layout_automatic">"Automatic"</string>
+  <string name="layout_wide">"Wide"</string>
+  <string name="layout_tall">"Tall"</string>
+  <string name="page_turn_edges">"Edge taps"</string>
+  <string name="page_turn_swipe">"Swipe"</string>
+  <string name="page_turn_both">"Edge taps + swipe"</string>
+  <string name="color_blue">"Blue"</string>
+  <string name="color_coral">"Coral"</string>
+  <string name="color_green">"Green"</string>
+  <string name="color_violet">"Violet"</string>
+  <string name="color_amber">"Amber"</string>
+  <string name="color_teal">"Teal"</string>
+  <string name="color_rose">"Rose"</string>
+  <string name="color_olive">"Olive"</string>
+  <string name="loading_library">"Loading library…"</string>
+  <string name="library_ready">"Library is ready"</string>
+  <string name="library_empty">"Library is empty"</string>
+  <string name="select_library_item">"Select a library item to start"</string>
+  <string name="index_missing">"Stored item index is missing"</string>
+  <string name="index_unreadable">"Stored item index could not be read: %1$s"</string>
+  <string name="rescan_after_error">"%1$s. Rescan its campaign folder."</string>
+  <string name="rebuilding_after_error">"%1$s · rebuilding %2$s…"</string>
+  <string name="library_still_loading">"Library is still loading"</string>
+  <string name="library_load_retry">"Library could not be loaded. Retry from the recovery panel."</string>
+  <string name="library_not_ready">"Library is not ready"</string>
+  <string name="add_documents_hint">"Add a PDF, Markdown note, or campaign folder from ⋮"</string>
+  <string name="retrying_item">"Retrying %1$s…"</string>
+  <string name="reader_menu_description">"Reader menu"</string>
+  <string name="search_button_description">"Search bookmarks and filenames. Hold for full-text search"</string>
+  <string name="search_button_tooltip">"Tap: Navigate · hold: Full text"</string>
+  <string name="edit_search_description">"Edit full-text search"</string>
+  <string name="more_text_results_description">"Load more full-text search results"</string>
+  <string name="folder_access_failed">"Could not keep access to folder"</string>
+  <string name="reading_folder_information">"Reading folder information…"</string>
+  <string name="library_folder_fallback">"Library folder"</string>
+  <string name="no_library_folders">"No library folders have been added yet"</string>
+  <string name="folder_scan_already_running">"A folder scan is already running"</string>
+  <string name="folder_scan_failed">"Folder scan failed"</string>
+  <string name="duplicate_pdf_uri">"%1$s: duplicate stored URI"</string>
+  <string name="ambiguous_known_pdf">"%1$s: matches multiple known books"</string>
+  <string name="ambiguous_matching_toc">"%1$s: multiple matching TXT files; PDF was still imported"</string>
+  <string name="duplicate_note_uri">"%1$s: duplicate stored note URI"</string>
+  <string name="ambiguous_known_note">"%1$s: matches multiple known notes"</string>
+  <string name="duplicate_album_uri">"%1$s: duplicate stored album URI"</string>
+  <string name="cannot_open_toc">"Could not open %1$s"</string>
+  <string name="toc_has_no_entries">"%1$s contained no valid TOC entries"</string>
+  <string name="empty_image_album">"Image album has no images"</string>
+  <string name="too_many_directories">"Folder tree contains too many directories"</string>
+  <string name="too_many_files">"Folder tree contains too many files"</string>
+  <string name="folder_scan_complete">"Folder scan complete"</string>
+  <string name="reading_document_information">"Reading document information…"</string>
+  <string name="unsupported_file">"Unsupported file"</string>
+  <string name="choose_supported_document">"Choose a PDF, .md, or .markdown file"</string>
+  <string name="pdf_access_failed">"Could not keep access to PDF"</string>
+  <string name="selected_pdf_fallback">"Selected PDF"</string>
+  <string name="keep_known_history">"Use %1$s and keep its history"</string>
+  <string name="create_separate_book">"Create a separate book"</string>
+  <string name="already_known_file">"%1$s is already known"</string>
+  <string name="note_access_failed">"Could not keep access to note"</string>
+  <string name="known_note_selected">"Known note selected"</string>
+  <string name="selected_note_fallback">"Selected note.md"</string>
+  <string name="adding_item">"Adding %1$s…"</string>
+  <string name="added_to_library_table">"%1$s added to the library and table"</string>
+  <string name="add_note_failed">"Add note failed"</string>
+  <string name="add_pdf_failed">"Add PDF failed"</string>
+  <string name="relink_failed">"Relink failed"</string>
+  <string name="source_already_used">"That source is already used by another library item"</string>
+  <string name="reading_replacement_source">"Reading replacement source…"</string>
+  <string name="choose_markdown">"Choose a .md or .markdown file"</string>
+  <string name="source_access_failed">"Could not keep access to source"</string>
+  <string name="relinking_item">"Relinking %1$s…"</string>
+  <string name="item_relinked">"%1$s relinked"</string>
+  <string name="note_relink_failed">"Note relink failed"</string>
+  <string name="updating_item">"Updating %1$s…"</string>
+  <string name="item_updated">"%1$s updated"</string>
+  <string name="pdf_update_failed">"PDF update failed"</string>
+  <string name="importing_bookmarks">"Importing bookmarks…"</string>
+  <string name="bookmark_file_fallback">"bookmark file"</string>
+  <string name="cannot_open_bookmark_file">"Could not open bookmark file"</string>
+  <string name="toc_import_failed">"TOC import failed"</string>
+  <string name="cannot_open_pdf">"Could not open PDF"</string>
+  <string name="opening_item">"Opening %1$s…"</string>
+  <string name="cannot_open_item">"Could not open %1$s: %2$s"</string>
+  <string name="source_changed_refreshing">"%1$s changed · refreshing…"</string>
+  <string name="read_permission_lost">"Read permission is no longer available"</string>
+  <string name="source_not_found">"The file or folder could not be found"</string>
+  <string name="cannot_open_source">"The source could not be opened"</string>
+  <string name="library_load_failed">"Library could not be loaded"</string>
+  <string name="catalog_unchanged">"\nThe existing catalog was left unchanged."</string>
+  <string name="select_items_from_library">"Select items from Library"</string>
+  <string name="choose_library_item_menu">"Choose a library item from ⋮"</string>
+  <string name="item_unavailable">"%1$s is unavailable"</string>
+  <string name="page_range_error">"Page must be 1–%1$d"</string>
+  <string name="reading_link_label">"Reading link label…"</string>
+  <string name="reference_page_jump_description">"Go to reference page. Current page %1$d of %2$d"</string>
+  <string name="search_reference_title">"Search · %1$s"</string>
+  <string name="search_reference_description">"Search %1$s, %2$s. Long press for reference actions"</string>
+  <string name="return_tab_start">"Return to tab start · %1$s"</string>
+  <string name="return_reference_start">"Return to reference start · %1$s"</string>
+  <string name="image_location">"image %1$d"</string>
+  <string name="page_location">"p%1$d"</string>
+  <string name="search_all_items_description">"Search all table items"</string>
+  <string name="search_book_description">"Search %1$s"</string>
+  <string name="close_tab_description">"Close %1$s"</string>
+  <string name="table_required">"Put at least one item on the table first."</string>
+  <string name="smartcase_on_description">"Case-sensitive search is on"</string>
+  <string name="smartcase_tooltip">"Case-sensitive search"</string>
+  <string name="close_search_description">"Close search"</string>
+  <string name="navigate_description">"Jump to bookmarks and filenames"</string>
+  <string name="search_text_hint">"Search document text"</string>
+  <string name="more_navigation_results_description">"Load more navigation results"</string>
+  <string name="smartcase_marker" translatable="false">Aa</string>
+  <string name="smartcase_summary">"%1$s · Aa case-sensitive"</string>
+  <string name="text_search_explanation">"Search results stay in the reference pane. Full-text search ignores case; plain words are combined and the final word also matches prefixes."</string>
+  <string name="search_selected_documents">"Search selected documents"</string>
+  <string name="navigate_summary">"Destinations · %1$s · %2$s"</string>
+  <string name="search_navigation_hint">"Search bookmarks and filenames"</string>
+  <string name="full_text_images_only">"Full text · selected images have no searchable text"</string>
+  <string name="full_text_scope_summary">"Full text · %1$s"</string>
+  <string name="search_all_text">"Search all text"</string>
+  <string name="search_this_document">"Search this document"</string>
+  <string name="missing_library_item">"Missing library item"</string>
+  <string name="markdown_no_headings">"Markdown note · no headings"</string>
+  <string name="image_result_detail">"%1$s · image %2$d/%3$d"</string>
+  <string name="heading_result_detail">"%1$s · %2$sheading"</string>
+  <string name="pdf_result_detail">"%1$s · %2$sp%3$d"</string>
+  <string name="open_existing_tab_description">"Open %1$s tab"</string>
+  <string name="open_new_tab_description">"Open %1$s in a new tab. Hold to add it in the background"</string>
+  <string name="open_reference_description">"Open %1$s alongside"</string>
+  <string name="images_not_searchable">"Selected images have no searchable text"</string>
+  <string name="search_failed">"Search failed: %1$s"</string>
+  <string name="updating_search">"Updating… · %1$s"</string>
+  <string name="search_matches_so_far">"%1$s so far"</string>
+  <!-- A progress fraction, not a standalone quantity; translators may use a neutral label. -->
+  <string name="search_indexing_progress" tools:ignore="PluralsCandidate">" · indexing %1$d/%2$d parts"</string>
+  <string name="missing_note">"Missing note"</string>
+  <string name="missing_book">"Missing book"</string>
+  <string name="note_section_detail">"%1$s · note section"</string>
+  <string name="page_section_detail">"%1$s · p%2$d"</string>
+  <string name="exact_section_suffix">" · section"</string>
+  <string name="near_section_suffix">" · near section"</string>
+  <string name="open_text_tab_description">"Open text result tab"</string>
+  <string name="open_new_text_tab_description">"Open text result in a new tab. Hold to add it in the background"</string>
+  <string name="preparing_page">"Preparing page %1$d…"</string>
+  <string name="render_failed">"Render failed"</string>
+  <string name="opening_note_reference">"Opening note reference…"</string>
+  <string name="reference_note_failed">"Reference note failed"</string>
+  <string name="rendering_reference_page">"Rendering reference page %1$d…"</string>
+  <string name="reference_render_failed">"Reference render failed"</string>
+  <string name="reading_annotations">"Reading annotations…"</string>
+  <string name="annotation_inspection_failed">"Annotation inspection failed"</string>
+  <string name="cannot_load_item">"Could not load %1$s"</string>
+  <string name="loading_item_index">"Loading %1$s index…"</string>
+  <string name="library_empty_hint">"No campaign files are known yet.\nAdd a PDF, Markdown note, or folder to start your library."</string>
+  <string name="no_items_on_table">"No library items are currently on the table."</string>
+  <string name="no_untagged_items">"Every library item has at least one tag."</string>
+  <string name="this_tag">"this tag"</string>
+  <string name="no_items_with_tag">"No library items have the tag “%1$s”."</string>
+  <string name="no_items_match_filter">"No library items match this filter."</string>
+  <!-- Three independent counts; use neutral labels rather than an inflected shared noun. -->
+  <string name="library_summary" tools:ignore="PluralsCandidate">"%1$d shown · %2$d on table · %3$d known"</string>
+  <string name="scanning_suffix">" · scanning…"</string>
+  <string name="item_actions_description">"Actions for %1$s"</string>
+  <string name="source_unavailable">"Source unavailable"</string>
+  <string name="take_item_off_table_title">"Take %1$s off the table?"</string>
+  <string name="select_at_least_one">"Select at least one item"</string>
+  <string name="tags_for_item">"Tags for %1$s"</string>
+  <string name="tag_name_empty">"Tag name cannot be empty"</string>
+  <string name="existing_tag_assigned">"Existing tag assigned"</string>
+  <string name="use_only_tag_on_table">"Use only this tag on table"</string>
+  <string name="add_tag_to_table">"Add tag to table"</string>
+  <string name="edit_tagged_items">"Edit tagged items…"</string>
+  <string name="forget_tagged_items">"Forget tagged items…"</string>
+  <string name="use_only_untagged_on_table">"Use only untagged items on table"</string>
+  <string name="add_untagged_to_table">"Add untagged items to table"</string>
+  <string name="forget_untagged_items">"Forget untagged items…"</string>
+  <string name="the_library_is_empty">"The library is empty"</string>
+  <string name="items_tagged">"Items tagged %1$s"</string>
+  <string name="tag_name_exists">"A tag with that name already exists"</string>
+  <string name="delete_tag_title">"Delete tag %1$s?"</string>
+  <string name="no_matching_items">"There are no matching library items"</string>
+  <string name="forget_other_tags_warning">"\n\nAlso tagged elsewhere and still forgotten:"</string>
+  <string name="forget_untagged_title">"Forget all untagged items?"</string>
+  <string name="forget_tagged_title">"Forget everything tagged %1$s?"</string>
+  <string name="forget_count_action">"Forget %1$d"</string>
+  <string name="already_on_table">"%1$s is already on the table"</string>
+  <string name="preparing_table">"Preparing %1$s…"</string>
+  <string name="loading_item_metadata">"Loading %1$s metadata…"</string>
+  <string name="refreshing_item">"Refreshing %1$s…"</string>
+  <string name="item_refreshed">"%1$s refreshed"</string>
+  <string name="note_refresh_failed">"Note refresh failed"</string>
+  <string name="rebuilding_text_index">"Rebuilding text index for %1$s"</string>
+  <string name="color_for_item">"Color for %1$s"</string>
+  <string name="forget_item_title">"Forget %1$s?"</string>
+  <string name="reading_view_summary">"Reading view · %1$s"</string>
+  <string name="current_book_title">"Current book · %1$s"</string>
+  <string name="library_menu_summary">"Library · %1$d/%2$d on table"</string>
+  <string name="diagnostics_title">"Diagnostics · %1$s"</string>
+  <string name="rescan_folders_action">"Rescan folders · %1$d"</string>
+
+  <!-- Complete quantity phrases; add locale-specific plural forms when translating. -->
+  <string name="pdf_library_summary">"%1$s · %2$s%3$s"</string>
+  <string name="tag_item_count">"%1$s · %2$s"</string>
+  <!-- Independent outcome counts; use neutral labels when translating. -->
+  <string name="scan_change_summary" tools:ignore="PluralsCandidate">"\n%1$d added · %2$d refreshed · %3$d unchanged"</string>
+  <string name="tags_with_more">"%1$s · +%2$d"</string>
+  <string name="tab_page">"Page %1$d"</string>
+  <string name="tab_text_with_page">"%1$s · p%2$d"</string>
+  <string name="take_off_table_message">"Its open tabs and temporary reference will close. Metadata, color, and visit history will remain in the library."</string>
+  <string name="forget_item_message">"Source files are not deleted, but NaIgre will permanently remove this item\'s tabs, metadata, color, and visit history."</string>
+  <string name="reading_pdf_summary">"%1$s, %2$s"</string>
+  <string name="interface_summary">"Interface · %1$s, %2$s"</string>
+  <string name="page_layout_summary">"Page layout · %1$s"</string>
+  <string name="skip_cover_summary">"Skip cover in spreads · %1$s"</string>
+  <string name="page_turn_summary">"Page turns · %1$s"</string>
+  <string name="theme_summary">"Theme · %1$s"</string>
+  <string name="layout_summary">"Reader layout · %1$s"</string>
+  <string name="fullscreen_summary">"Fullscreen + above lock screen · %1$s"</string>
+  <string name="table_replaced">"Table now uses %1$s"</string>
+  <string name="items_added_to_table">"Added to table: %1$s"</string>
+  <string name="library_filter_description">"Show %1$s library items"</string>
+  <string name="library_tag_filter_description">"Show %1$s library items. Long press for tag actions"</string>
+  <string name="reference_description">"%1$s. Long press for reference actions"</string>
+  <string name="reference_document_description">"%1$s, page %2$d of %3$d. Long press for reference actions"</string>
+  <string name="rendering_pages">"Rendering page %1$s…"</string>
+  <string name="cannot_list_folder">"Could not list %1$s"</string>
+  <string name="read_access_not_granted">"The document provider did not grant read access"</string>
+  <string name="toc_source_suffix">" · TXT: %1$s"</string>
+  <plurals name="loading_table_indexes">
+    <item quantity="one">"Loading %1$d table index…"</item>
+    <item quantity="other">"Loading %1$d table indexes…"</item>
+  </plurals>
+  <plurals name="scanning_folders">
+    <item quantity="one">"Scanning %1$d library folder…"</item>
+    <item quantity="other">"Scanning %1$d library folders…"</item>
+  </plurals>
+  <plurals name="folders_scanned">
+    <item quantity="one">"%1$d folder scanned"</item>
+    <item quantity="other">"%1$d folders scanned"</item>
+  </plurals>
+  <plurals name="pdfs_found">
+    <item quantity="one">" · %1$d PDF found"</item>
+    <item quantity="other">" · %1$d PDFs found"</item>
+  </plurals>
+  <plurals name="notes_found">
+    <item quantity="one">" · %1$d note"</item>
+    <item quantity="other">" · %1$d notes"</item>
+  </plurals>
+  <plurals name="albums_found">
+    <item quantity="one">" · %1$d album"</item>
+    <item quantity="other">" · %1$d albums"</item>
+  </plurals>
+  <plurals name="album_images_found">
+    <item quantity="one">" (%1$d image)"</item>
+    <item quantity="other">" (%1$d images)"</item>
+  </plurals>
+  <plurals name="matching_tocs_imported">
+    <item quantity="one">"\n%1$d matching TOC imported"</item>
+    <item quantity="other">"\n%1$d matching TOCs imported"</item>
+  </plurals>
+  <plurals name="invalid_lines_ignored">
+    <item quantity="one">" · %1$d invalid line ignored"</item>
+    <item quantity="other">" · %1$d invalid lines ignored"</item>
+  </plurals>
+  <plurals name="scan_warnings">
+    <item quantity="one">"\n%1$d warning"</item>
+    <item quantity="other">"\n%1$d warnings"</item>
+  </plurals>
+  <plurals name="scan_failures">
+    <item quantity="one">" · %1$d failure"</item>
+    <item quantity="other">" · %1$d failures"</item>
+  </plurals>
+  <plurals name="bookmarks_imported">
+    <item quantity="one">"Imported %1$d bookmark"</item>
+    <item quantity="other">"Imported %1$d bookmarks"</item>
+  </plurals>
+  <plurals name="bookmark_index_entries">
+    <item quantity="one">"Bookmark index: %1$d entry"</item>
+    <item quantity="other">"Bookmark index: %1$d entries"</item>
+  </plurals>
+  <plurals name="search_result_count">
+    <item quantity="one">"%1$d result"</item>
+    <item quantity="other">"%1$d results"</item>
+  </plurals>
+  <plurals name="match_count">
+    <item quantity="one">"%1$d match"</item>
+    <item quantity="other">"%1$d matches"</item>
+  </plurals>
+  <plurals name="document_count">
+    <item quantity="one">"%1$d document"</item>
+    <item quantity="other">"%1$d documents"</item>
+  </plurals>
+  <plurals name="item_count">
+    <item quantity="one">"%1$d item"</item>
+    <item quantity="other">"%1$d items"</item>
+  </plurals>
+  <plurals name="searching_documents">
+    <item quantity="one">"Searching %1$d document…"</item>
+    <item quantity="other">"Searching %1$d documents…"</item>
+  </plurals>
+  <plurals name="image_album_summary">
+    <item quantity="one">"Image album · %1$d image"</item>
+    <item quantity="other">"Image album · %1$d images"</item>
+  </plurals>
+  <plurals name="note_heading_summary">
+    <item quantity="one">"Markdown note · %1$d heading"</item>
+    <item quantity="other">"Markdown note · %1$d headings"</item>
+  </plurals>
+  <plurals name="pdf_no_bookmarks">
+    <item quantity="one">"PDF · %1$d page · no bookmarks"</item>
+    <item quantity="other">"PDF · %1$d pages · no bookmarks"</item>
+  </plurals>
+  <plurals name="text_indexes_failed">
+    <item quantity="one">" · %1$d text index failed"</item>
+    <item quantity="other">" · %1$d text indexes failed"</item>
+  </plurals>
+  <plurals name="library_folder_count">
+    <item quantity="one">" · %1$d folder"</item>
+    <item quantity="other">" · %1$d folders"</item>
+  </plurals>
+  <plurals name="index_load_failures">
+    <item quantity="one">" · %1$d index load failure"</item>
+    <item quantity="other">" · %1$d index load failures"</item>
+  </plurals>
+  <plurals name="page_count">
+    <item quantity="one">"%1$d page"</item>
+    <item quantity="other">"%1$d pages"</item>
+  </plurals>
+  <plurals name="bookmark_count">
+    <item quantity="one">"%1$d bookmark"</item>
+    <item quantity="other">"%1$d bookmarks"</item>
+  </plurals>
+  <plurals name="delete_tag_message">
+    <item quantity="one">"The tag will be removed from %1$d item. Library items, table selection, tabs, and history will be kept."</item>
+    <item quantity="other">"The tag will be removed from %1$d items. Library items, table selection, tabs, and history will be kept."</item>
+  </plurals>
+  <plurals name="forget_items_message">
+    <item quantity="one">"NaIgre will permanently remove %1$d item, including its tabs, metadata, colors, tags, and visit history. Source files will not be deleted."</item>
+    <item quantity="other">"NaIgre will permanently remove %1$d items, including their tabs, metadata, colors, tags, and visit history. Source files will not be deleted."</item>
+  </plurals>
+  <plurals name="search_indexing_complete">
+    <item quantity="one">"%1$s · %2$d/%3$d document indexed"</item>
+    <item quantity="other">"%1$s · %2$d/%3$d documents indexed"</item>
+  </plurals>
+  <plurals name="matches_shown">
+    <item quantity="one">"%1$d of %2$d match"</item>
+    <item quantity="other">"%1$d of %2$d matches"</item>
+  </plurals>
+  <plurals name="rejected_entries_suffix">
+    <item quantity="one">" · %1$d rejected"</item>
+    <item quantity="other">" · %1$d rejected"</item>
+  </plurals>
+    <!-- Expected document failures; unexpected exception details remain diagnostic text. -->
+    <string name="error_not_pdf">Selected file is not a PDF</string>
+    <string name="error_pdf_password">Password-protected PDFs are not supported</string>
+    <string name="error_empty_pdf">PDF has no pages</string>
+    <string name="error_open_note">Could not open Markdown note</string>
+    <string name="error_note_too_large">Markdown note is larger than 8 MB</string>
+    <string name="error_empty_album">Image album is empty</string>
+    <string name="error_open_image">Could not open image</string>
+    <string name="error_invalid_image">Unsupported or damaged image</string>
+    <string name="load_library_failed">Load library failed</string>
+    <string name="load_item_index_failed">Load item index failed</string>
+    <string name="save_library_failed">Save library failed</string>
+    <string name="save_item_index_failed">Save item index failed</string>
+    <string name="delete_item_index_failed">Delete item index failed</string>
 </resources>

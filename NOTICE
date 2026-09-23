@@ -2,7 +2,7 @@ NaIgre application source is distributed under AGPL-3.0-or-later.
 See LICENSE. Application source and build instructions:
 https://github.com/wund0r/naigre
 
-Runtime dependency inventory for the 26.09.0 candidate:
+Runtime dependency inventory:
 
 MuPDF Java/Android bindings (com.artifex.mupdf:fitz:1.28.0)
 Copyright (c) 2006-2026 Artifex Software, Inc.

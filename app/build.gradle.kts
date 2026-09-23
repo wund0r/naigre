@@ -47,9 +47,9 @@ android {
         targetSdk = 36
         // YY.MM.release: increment the final number for every release within the month.
         // versionCode never resets, even when the calendar month changes.
-        versionCode = 63
-        versionName = "26.09.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        versionCode = 64
+        versionName = "26.09.1"
+        testInstrumentationRunner = "wund0r.naigre.reader.LocalizationTestRunner"
     }
 
     signingConfigs {
@@ -99,6 +99,17 @@ android {
 
 androidComponents.onVariants { variant ->
     variant.sources.assets?.addGeneratedSourceDirectory(prepareLicenseAssets, LicenseAssetsTask::assetOutputDirectory)
+}
+
+// LocalizationCatalogTest reads source XML directly; text-only edits must rerun it
+// even when generated R symbols and the unit-test classpath are unchanged.
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    inputs.files(
+        "src/main/AndroidManifest.xml",
+        "src/main/res/xml/locale_config.xml",
+        "src/main/res/values/strings.xml",
+        "src/main/res/values-ru/strings.xml",
+    ).withPropertyName("localizationCatalog").withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
 fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")

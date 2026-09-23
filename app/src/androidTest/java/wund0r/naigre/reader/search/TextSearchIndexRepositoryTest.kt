@@ -3,6 +3,7 @@
 package wund0r.naigre.reader.search
 
 import android.content.Context
+import android.graphics.Paint
 import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import androidx.test.core.app.ApplicationProvider
@@ -21,11 +22,13 @@ import wund0r.naigre.reader.pdf.PdfAnnotationInfo
 import wund0r.naigre.reader.pdf.PdfDocument
 import wund0r.naigre.reader.pdf.PdfOutlineEntry
 import wund0r.naigre.reader.pdf.PdfRect
+import wund0r.naigre.reader.pdf.MuPdfDocument
 import wund0r.naigre.reader.pdf.RenderedPdfPage
 import wund0r.naigre.reader.table.BookRecord
 import wund0r.naigre.reader.table.LibraryItemKind
 import wund0r.naigre.reader.table.sourceRevisionKey
 import java.util.ArrayDeque
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.Executor
 
@@ -46,6 +49,45 @@ class TextSearchIndexRepositoryTest {
     fun tearDown() {
         repository.close()
         context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun cyrillicFullTextSupportsCaseFoldingPhrasesAndPrefixes() {
+        val book = testBook("russian", 1)
+        storeCompleteBook(book.id, book.sourceRevisionKey(), "ЁЖ сторожит БАШНЮ. Ёлочка у ворот.")
+        for (query in listOf("ёж", "ЁЖ", "башню", "БАШНЮ", "башн", "ёлоч", "\"ёж сторожит\"")) {
+            val result = searchBook(book, query)
+            assertEquals(query, 1, result.totalMatches)
+            assertEquals(book.id, result.hits.single().bookId)
+        }
+    }
+
+    @Test
+    fun cyrillicPdfRendersAndItsExtractedTextIsSearchable() {
+        val file = File(context.cacheDir, "cyrillic-${UUID.randomUUID()}.pdf")
+        try {
+            val pdf = android.graphics.pdf.PdfDocument()
+            try {
+                val page = pdf.startPage(android.graphics.pdf.PdfDocument.PageInfo.Builder(480, 640, 1).create())
+                page.canvas.drawText("Ёж сторожит башню", 24f, 80f, Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 26f })
+                pdf.finishPage(page)
+                file.outputStream().use(pdf::writeTo)
+            } finally {
+                pdf.close()
+            }
+            MuPdfDocument(file).use { pdf ->
+                val rendered = pdf.renderPage(0, 480)
+                assertEquals(480, rendered.bitmap.width)
+                rendered.bitmap.recycle()
+                val book = testBook("cyrillic-pdf", 1)
+                storeCompleteBook(book.id, book.sourceRevisionKey(), pdf.textForSearch(0))
+                for (query in listOf("ёж", "ЁЖ", "башн", "\"ёж сторожит\"")) {
+                    assertEquals(query, 1, searchBook(book, query).totalMatches)
+                }
+            }
+        } finally {
+            file.delete()
+        }
     }
 
     @Test

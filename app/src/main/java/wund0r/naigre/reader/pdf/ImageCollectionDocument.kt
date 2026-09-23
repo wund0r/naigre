@@ -28,7 +28,7 @@ class ImageCollectionDocument(
     private var closed = false
 
     init {
-        require(images.isNotEmpty()) { "Image album is empty" }
+        if (images.isEmpty()) throw DocumentReadException(DocumentReadProblem.EMPTY_ALBUM)
         require(maxDecodedPixels > 0L) { "Image decode budget must be positive" }
     }
 
@@ -86,10 +86,10 @@ class ImageCollectionDocument(
     private fun decodeLegacy(uri: Uri): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         contentResolver.openInputStream(uri).use { input ->
-            requireNotNull(input) { "Could not open image" }
+            if (input == null) throw DocumentReadException(DocumentReadProblem.CANNOT_OPEN_IMAGE)
             BitmapFactory.decodeStream(input, null, bounds)
         }
-        require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Unsupported or damaged image" }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw DocumentReadException(DocumentReadProblem.INVALID_IMAGE)
         val desired = boundedSize(bounds.outWidth, bounds.outHeight)
         var sample = 1
         while (
@@ -101,10 +101,9 @@ class ImageCollectionDocument(
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         val decoded = contentResolver.openInputStream(uri).use { input ->
-            requireNotNull(input) { "Could not open image" }
-            requireNotNull(BitmapFactory.decodeStream(input, null, options)) {
-                "Unsupported or damaged image"
-            }
+            if (input == null) throw DocumentReadException(DocumentReadProblem.CANNOT_OPEN_IMAGE)
+            BitmapFactory.decodeStream(input, null, options)
+                ?: throw DocumentReadException(DocumentReadProblem.INVALID_IMAGE)
         }
         if (decoded.width == desired.first && decoded.height == desired.second) return decoded
         val scaled = Bitmap.createScaledBitmap(decoded, desired.first, desired.second, true)
@@ -113,7 +112,7 @@ class ImageCollectionDocument(
     }
 
     private fun boundedSize(sourceWidth: Int, sourceHeight: Int): Pair<Int, Int> {
-        require(sourceWidth > 0 && sourceHeight > 0) { "Unsupported or damaged image" }
+        if (sourceWidth <= 0 || sourceHeight <= 0) throw DocumentReadException(DocumentReadProblem.INVALID_IMAGE)
         val sourcePixels = sourceWidth.toLong() * sourceHeight
         val scale = minOf(
             1.0,
