@@ -6,9 +6,6 @@ NaIgre is built for looking things up at the table, especially at TTRPG sessions
 
 **Status: public beta.** A version in the source tree does not mean an APK has been published yet.
 
-This README describes the **26.09.1 release candidate**. See GitHub Releases for
-published APKs; the `26.09.0` APK does not include the new language and library UI features below.
-
 ## Install
 
 Requires **Android 8.0 or newer (API 26+)**. Phones and tablets are supported.
@@ -78,11 +75,13 @@ previews too. Forgetting an item clears its cached previews, not its source file
 | Tap a result's `+` | Open its tab in the foreground |
 | Hold `+` | Open in the background; the action becomes `✓` |
 | Tap `✓` | Switch to that result's existing tab |
-| Tap a navigation result's reference action `▥` | Open it in the reference pane |
+| Tap a navigation result's reference action `◨` (Wide) / `⬒` (Tall) | Open it in the reference pane |
 | Hold a tab or document reference indicator | Tab/reference actions, including returning to its starting position |
 | Tap a blank document area | Hide/show reader controls; Search remains available at bottom-right |
 | Tap a Markdown heading | Cycle collapsed → descendant headings only → fully expanded; a leaf heading simply toggles |
 | Tap the page indicator | Jump directly to a page |
+
+Use **Menu → Reading view → Reset zoom** to reset the view.
 
 Book colors identify the same item across library, tabs and search. In the book's
 **⋮ → Choose color**, pick a preset or **Custom…**: adjust hue, saturation and

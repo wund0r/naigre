@@ -12,6 +12,13 @@
   <string name="rescan">"Rescan"</string>
   <string name="library">"Library"</string>
   <string name="library_menu_description">"Library menu"</string>
+  <string name="quickstart_menu">Quickstart &amp; help</string>
+  <string name="quickstart_title">Quickstart</string>
+  <string name="quickstart_empty_link">New here? Open the quickstart</string>
+  <string name="help_back">Back</string>
+  <string name="help_contents">Contents</string>
+  <string name="help_loading">Loading help…</string>
+  <string name="help_load_failed">Could not load the bundled help. Close it and try again.</string>
   <string name="diagnostics">"Diagnostics"</string>
   <string name="edit">"Edit"</string>
   <string name="close_reference">"Close reference"</string>

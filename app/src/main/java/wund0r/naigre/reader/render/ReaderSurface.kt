@@ -108,7 +108,7 @@ class ReaderSurface(context: Context) : View(context) {
             return true
         }
 
-        override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+        override fun onSingleTapUp(e: MotionEvent): Boolean {
             hitLink(e.x, e.y)?.let {
                 onLinkTap?.invoke(it)
                 return true
@@ -135,12 +135,12 @@ class ReaderSurface(context: Context) : View(context) {
             onBlankTap?.invoke()
             return true
         }
-
-        override fun onDoubleTap(e: MotionEvent): Boolean {
-            resetTransform()
-            return true
-        }
-    })
+    }).apply {
+        // SimpleOnGestureListener is also registered as a double-tap listener by default.
+        // Disable that recognition so every tap responds on release, including rapid taps.
+        // Zoom reset remains available from the reader menu.
+        setOnDoubleTapListener(null)
+    }
 
     fun setPages(
         leftPage: RenderedPdfPage?,

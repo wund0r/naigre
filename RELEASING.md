@@ -66,6 +66,8 @@ See [Android app signing](https://developer.android.com/studio/publish/app-signi
 Set the Android SDK location as described in the README, then:
 
 ```sh
+export NAIGRE_SIGNING_PROPERTIES="$HOME/.local/share/naigre/signing/release.properties"
+./gradlew :app:checkReleaseKey
 ./gradlew :app:preparePublicRelease
 ```
 
@@ -160,12 +162,3 @@ tagged release remains a manual publication step.
 
 Do not publish credentials or raw logs/diagnostics containing private source names.
 There is no automatic GitHub publishing pipeline or in-app updater.
-
-## One-time transition for the three prototype testers
-
-Old debug builds occupied `wund0r.naigre.reader`. The new release certificate cannot
-directly update those builds. After the user agrees, uninstall the old prototype,
-install the public APK and re-add documents. This intentionally loses app-owned
-library metadata, tags, visits, tabs and settings; original files remain untouched.
-No migration machinery is provided. Ordinary subsequent release updates should
-retain app data. Never use uninstall as the standard update procedure.

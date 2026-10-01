@@ -1,5 +1,15 @@
 # NaIgre changelog
 
+## Unreleased
+
+- Добавлен "быстрый старт", который объясняет фишки приложения. Он будет доступен на странице библиотеки (если она пуста) и через меню.
+- Нажатие на пустое место документа теперь почти мгновенно показывает или скрывает панель вкладок и другой интерфейс. Скоооооорость.
+- Иконка выноски в списке результатов поиска теперь более очевидна и зависит от композиции панелей: ◨ для горизонтальной и ⬒ для вертикальной.
+
+- Added offline Quickstart & help to the reader and Library menus, plus a quickstart link when the entire library is empty. Short English/Russian Markdown guides include a Contents picker and Back navigation; help is separate from library items, table selection and search results.
+- PDF/image taps now respond on release without waiting for double-tap confirmation. Reader controls show/hide immediately; double-tap zoom reset is removed, with Reset zoom still available in the menu.
+- The navigation-result reference action now uses ◨ in Wide layout and ⬒ in Tall layout to indicate the destination pane.
+
 ## v26.09.1 — UI and languages (release candidate, not yet published)
 
 - Books support custom opaque colors alongside the existing eight presets. The color picker provides hue/saturation/brightness sliders, optional exact `#RRGGBB` input, and live swatch/selected-tab previews. Apply saves the color across library, tabs and search without rebuilding previews or text indexes; Cancel discards the draft. English and Russian labels are included.

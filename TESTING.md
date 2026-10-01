@@ -1,5 +1,37 @@
 # Testing NaIgre
 
+## Immediate reader taps — 2026-10-01 (unreleased)
+
+- PDF/image tap actions run on release, without double-tap confirmation. Rapid
+  taps remain separate actions; double-tap zoom reset is removed. Menu → Reading
+  view → Reset zoom remains available, and pinch/pan handling is unchanged.
+- Added four gesture instrumentation checks: immediate blank taps, rapid taps
+  preserving zoom, edge page turns, and drag/cancel not toggling reader controls.
+  These compile but have not been run on a device; installed apps are untouched.
+- Local verification: 41 JVM tests passed; debug build and lint passed (0 errors,
+  13 existing warnings). Manual checks: show/hide controls in both panes on PDFs
+  and images, rapid taps, links/annotations, edge turns, pinch/pan and menu reset.
+
+## Offline quickstart — 2026-10-01 (unreleased)
+
+- The empty-library quickstart button uses the theme's accent/on-accent colors,
+  20 dp horizontal padding, a 48 dp minimum height and a wrapping label. The UI
+  check also covers its colors and text fit at 320 dp width with enlarged text.
+- Help opens from both menus and from a genuinely empty Library, not an empty
+  tag/filter result. It uses a separate full-screen Markdown view with Back and
+  Contents; no book, tab, visit or search-index entry is created.
+- Editable starter guides: `app/src/main/res/raw/quickstart.md` (English) and
+  `app/src/main/res/raw-ru/quickstart.md` (Russian). Android selects the language;
+  both are bundled offline, with no screenshots or runtime dependency additions.
+- Local verification: 41 JVM tests passed; debug build and lint passed (0 errors,
+  13 existing warnings). Both guide resources are packaged in the APK; TOC examples
+  are checked against the real importer. UI tests compile but were not run on
+  devices, to leave the installed verification apps and their manual setup intact.
+- Manual/device checks still needed: empty-library link and both menu entries;
+  Contents navigation, Back and Activity recreation; English/Russian, both themes
+  and enlarged text; system-bar insets/fullscreen; opening/closing help with an
+  active reference search or a filtered Library leaves the underlying state alone.
+
 ## Release candidate 26.09.1 (64) — 2026-09-23
 
 - Includes Russian localization, library settings/tag grouping, compact document

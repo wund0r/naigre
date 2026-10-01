@@ -10,6 +10,13 @@
   <string name="rescan">Сканировать</string>
   <string name="library">Библиотека</string>
   <string name="library_menu_description">Меню библиотеки</string>
+  <string name="quickstart_menu">Знакомство и справка</string>
+  <string name="quickstart_title">Справка</string>
+  <string name="quickstart_empty_link">Впервые здесь? Открой краткое руководство</string>
+  <string name="help_back">Назад</string>
+  <string name="help_contents">Разделы</string>
+  <string name="help_loading">Загрузка справки…</string>
+  <string name="help_load_failed">Не удалось загрузить справку. Закрой и попробуй ещё раз.</string>
   <string name="diagnostics">Диагностика</string>
   <string name="edit">Правка</string>
   <string name="close_reference">Закрыть выноску</string>

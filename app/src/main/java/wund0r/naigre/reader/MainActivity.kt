@@ -109,6 +109,7 @@ import wund0r.naigre.reader.ui.LibraryCardView
 import wund0r.naigre.reader.ui.LibraryPreviewLoader
 import wund0r.naigre.reader.ui.BookColorPicker
 import wund0r.naigre.reader.ui.RgbColor
+import wund0r.naigre.reader.ui.QuickstartDialog
 import wund0r.naigre.reader.table.mergeHydratedBookIndex
 import wund0r.naigre.reader.table.mergeSourceBookResult
 import wund0r.naigre.reader.table.sourceRevisionKey
@@ -152,6 +153,7 @@ class MainActivity : Activity() {
         private const val STATE_SPREAD_SKIP_COVER = "spread-skip-cover"
         private const val STATE_IMMERSIVE = "immersive"
         private const val STATE_LIBRARY_OPEN = "library-open"
+        private const val STATE_QUICKSTART_OPEN = "quickstart-open"
         private const val STATE_LIBRARY_FILTER = "library-filter"
         private const val STATE_LIBRARY_TAG = "library-tag"
         private const val IMAGE_CACHE_WIDTH_SENTINEL = 1
@@ -358,12 +360,15 @@ class MainActivity : Activity() {
     private var pendingTocBookId: String? = null
     private var pendingRelinkBookId: String? = null
     private var libraryDialog: Dialog? = null
+    private var quickstartDialog: QuickstartDialog? = null
+    private var restoreQuickstartAfterLoad = false
     private var restoreLibraryAfterLoad = false
     private var libraryAdapter: BaseAdapter? = null
     private var libraryPreviewLoader: LibraryPreviewLoader? = null
     private var librarySelectionLabel: TextView? = null
     private var libraryTagStrip: LinearLayout? = null
     private var libraryEmptyLabel: TextView? = null
+    private var libraryQuickstartButton: Button? = null
     private var libraryVisibleBooks: List<BookRecord> = emptyList()
     private var libraryFilter = LibraryFilter(LibraryFilterKind.ALL)
     private var hasResumed = false
@@ -462,6 +467,7 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         immersive = savedInstanceState?.getBoolean(STATE_IMMERSIVE) ?: false
         restoreLibraryAfterLoad = savedInstanceState?.getBoolean(STATE_LIBRARY_OPEN) ?: false
+        restoreQuickstartAfterLoad = savedInstanceState?.getBoolean(STATE_QUICKSTART_OPEN) ?: false
         libraryFilter = LibraryFilter(
             runCatching {
                 LibraryFilterKind.valueOf(savedInstanceState?.getString(STATE_LIBRARY_FILTER).orEmpty())
@@ -533,6 +539,9 @@ class MainActivity : Activity() {
                     updateNavigationControls()
                     updateEmptyState()
                 }
+            }
+            if (restoreQuickstartAfterLoad) {
+                mainHandler.post { if (!destroying) showQuickstart() }
             }
         }
     }
@@ -744,6 +753,7 @@ class MainActivity : Activity() {
         outState.putBoolean(STATE_SPREAD_SKIP_COVER, spreadSkipCover)
         outState.putBoolean(STATE_IMMERSIVE, immersive)
         outState.putBoolean(STATE_LIBRARY_OPEN, libraryDialog?.isShowing == true || restoreLibraryAfterLoad)
+        outState.putBoolean(STATE_QUICKSTART_OPEN, quickstartDialog?.isShowing == true || restoreQuickstartAfterLoad)
         outState.putString(STATE_LIBRARY_FILTER, libraryFilter.kind.name)
         outState.putString(STATE_LIBRARY_TAG, libraryFilter.tagId)
         readerSessionRepository.saveTabsToInstanceState(outState, tabs, activeTabIndex)
@@ -752,6 +762,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         destroying = true
+        quickstartDialog?.dismiss()
         libraryDialog?.dismiss()
         ++renderGeneration
         ++prefetchGeneration
@@ -4723,6 +4734,14 @@ class MainActivity : Activity() {
             },
         )
         list.adapter = adapter
+        var referenceIconLayout = resolvedReaderLayout()
+        container.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val layout = resolvedReaderLayout()
+            if (layout != referenceIconLayout) {
+                referenceIconLayout = layout
+                adapter.notifyDataSetChanged()
+            }
+        }
         container.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(560)))
 
         val textAction = LinearLayout(this).apply {
@@ -4993,7 +5012,6 @@ class MainActivity : Activity() {
                 }
                 row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(48)))
                 val alongside = Button(this@MainActivity).apply {
-                    text = "▥"
                     textSize = 20f
                     isAllCaps = false
                     minWidth = 0
@@ -5045,6 +5063,7 @@ class MainActivity : Activity() {
             } else {
                 getString(R.string.open_new_tab_description, item.title)
             }
+            holder.alongside.text = if (resolvedReaderLayout() == ReaderLayoutMode.WIDE) "◨" else "⬒"
             holder.alongside.contentDescription = getString(R.string.open_reference_description, item.title)
             row.setOnClickListener { onOpen(item) }
             holder.plus.setOnClickListener {
@@ -6464,6 +6483,7 @@ class MainActivity : Activity() {
         libraryTagStrip?.let(::populateLibraryTagStrip)
         librarySelectionLabel?.text = librarySummaryLabel()
         libraryEmptyLabel?.text = libraryEmptyMessage()
+        libraryQuickstartButton?.visibility = if (books.isEmpty()) View.VISIBLE else View.GONE
         libraryAdapter?.notifyDataSetChanged()
         updateNavigationControls()
         updateEmptyState()
@@ -6731,13 +6751,29 @@ class MainActivity : Activity() {
             setPadding(dp(2), dp(2), dp(2), dp(12))
             clipToPadding = false
         }
-        val empty = TextView(this).apply {
+        val empty = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        libraryEmptyLabel = TextView(this).apply {
             text = libraryEmptyMessage()
             textSize = 18f
             gravity = Gravity.CENTER
             setTextColor(uiPalette.textSecondary)
         }
-        libraryEmptyLabel = empty
+        empty.addView(libraryEmptyLabel, LinearLayout.LayoutParams(-1, -2))
+        libraryQuickstartButton = Button(this).apply {
+            text = getString(R.string.quickstart_empty_link)
+            minHeight = dp(CHROME_TOUCH_SIZE_DP)
+            setSingleLine(false)
+            ellipsize = null
+            setTextColor(uiPalette.onAccent)
+            background = controlBackground(uiPalette.accent)
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+            visibility = if (books.isEmpty()) View.VISIBLE else View.GONE
+            setOnClickListener { showQuickstart() }
+        }
+        empty.addView(libraryQuickstartButton, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
         gridFrame.addView(grid, FrameLayout.LayoutParams(-1, -1))
         gridFrame.addView(empty, FrameLayout.LayoutParams(-1, -1))
         grid.emptyView = empty
@@ -6799,6 +6835,7 @@ class MainActivity : Activity() {
                     librarySelectionLabel = null
                     libraryTagStrip = null
                     libraryEmptyLabel = null
+                    libraryQuickstartButton = null
                     libraryVisibleBooks = emptyList()
                 }
             }
@@ -7523,6 +7560,22 @@ class MainActivity : Activity() {
         showMainMenu(MenuContext.READER)
     }
 
+    private fun showQuickstart() {
+        restoreQuickstartAfterLoad = false
+        if (quickstartDialog?.isShowing == true) return
+        val dialog = QuickstartDialog(this, uiPalette) { helpWindow ->
+            if (!destroying) applyImmersiveToWindow(helpWindow, immersive)
+        }
+        dialog.contentView.setOnApplyWindowInsetsListener { view, insets ->
+            val edges = edgeInsets(insets)
+            view.setPadding(edges.left, edges.top, edges.right, edges.bottom)
+            insets
+        }
+        dialog.setOnDismissListener { if (quickstartDialog === dialog) quickstartDialog = null }
+        quickstartDialog = dialog
+        dialog.show()
+    }
+
     private fun showMainMenu(context: MenuContext) {
         val currentBook = activeBook()
         val readingSummary = when (if (context == MenuContext.LIBRARY) LibraryItemKind.PDF else currentBook?.kind) {
@@ -7540,6 +7593,7 @@ class MainActivity : Activity() {
             actions += getString(R.string.library_menu_summary, selectedBookIds.size, books.size) to { showLibraryMenu() }
         }
         actions += getString(R.string.diagnostics_title, appVersionLabel()) to { showDiagnostics() }
+        actions += getString(R.string.quickstart_menu) to { showQuickstart() }
         showReaderActionList(actions)
     }
 

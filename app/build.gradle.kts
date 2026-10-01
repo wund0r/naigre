@@ -48,7 +48,7 @@ android {
         // YY.MM.release: increment the final number for every release within the month.
         // versionCode never resets, even when the calendar month changes.
         versionCode = 64
-        versionName = "26.09.1"
+        versionName = "26.10.0"
         testInstrumentationRunner = "wund0r.naigre.reader.LocalizationTestRunner"
     }
 
@@ -101,7 +101,7 @@ androidComponents.onVariants { variant ->
     variant.sources.assets?.addGeneratedSourceDirectory(prepareLicenseAssets, LicenseAssetsTask::assetOutputDirectory)
 }
 
-// LocalizationCatalogTest reads source XML directly; text-only edits must rerun it
+// Localization/help tests read source resources directly; text-only edits must rerun them
 // even when generated R symbols and the unit-test classpath are unchanged.
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
     inputs.files(
@@ -109,6 +109,8 @@ tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
         "src/main/res/xml/locale_config.xml",
         "src/main/res/values/strings.xml",
         "src/main/res/values-ru/strings.xml",
+        "src/main/res/raw/quickstart.md",
+        "src/main/res/raw-ru/quickstart.md",
     ).withPropertyName("localizationCatalog").withPathSensitivity(PathSensitivity.RELATIVE)
 }
 

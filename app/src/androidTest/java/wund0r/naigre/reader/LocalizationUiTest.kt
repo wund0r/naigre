@@ -8,6 +8,8 @@ import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.LocaleList
 import android.os.Bundle
@@ -319,6 +321,146 @@ class LocalizationUiTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 29)
+    fun emptyLibraryQuickstartAndMenuWorkInBothLanguagesWithoutAddingBooks() {
+        BookLibraryRepository(context).saveCatalog(BookLibraryState(emptyList(), linkedSetOf(), emptyList(), emptyList()))
+        for ((language, theme) in listOf("en" to "DARK", "ru" to "LIGHT")) {
+            LocalizationTestRunner.activityConfiguration = Configuration().apply {
+                setLocale(Locale.forLanguageTag(language))
+                fontScale = 1.3f
+            }
+            context.getSharedPreferences("pdf-jump", Context.MODE_PRIVATE).edit().putString("reader-theme", theme).commit()
+            scenario = ActivityScenario.launch(MainActivity::class.java)
+            awaitLibrary()
+            scenario!!.onActivity { activity ->
+                val root = field<Dialog>(activity, "libraryDialog")
+                    .findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
+                layout(root, 320, 640)
+                val button = field<TextView>(activity, "libraryQuickstartButton")
+                val density = activity.resources.displayMetrics.density
+                assertTrue(button.isShown)
+                assertTrue(textFits(button))
+                assertTrue(inside(button, root))
+                assertTrue(button.height >= (48 * density).toInt())
+                assertEquals((20 * density).toInt(), button.paddingLeft)
+                assertEquals((20 * density).toInt(), button.paddingRight)
+                val dark = theme == "DARK"
+                assertEquals(activity.getColor(if (dark) R.color.naigre_dark_on_accent else R.color.naigre_light_on_accent),
+                    button.currentTextColor)
+                val fill = (button.background as RippleDrawable).getDrawable(0) as GradientDrawable
+                assertEquals(activity.getColor(if (dark) R.color.naigre_dark_accent else R.color.naigre_light_accent),
+                    fill.color!!.defaultColor)
+                button.performClick()
+            }
+            awaitQuickstart()
+            scenario!!.onActivity { activity ->
+                val dialog = field<Dialog>(activity, "quickstartDialog")
+                val root = dialog.findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
+                layout(root, 320, 640)
+                val contents = textView(root, activity.getString(R.string.help_contents))
+                assertTrue(textFits(contents))
+                assertTrue(textFits(textView(root, activity.getString(R.string.quickstart_title))))
+                contents.performClick()
+            }
+            instrumentation.waitForIdleSync()
+            scenario!!.onActivity { assertTrue(menuItems().isNotEmpty()) }
+            clickMenuItem(0)
+            scenario!!.recreate()
+            awaitQuickstart()
+            scenario!!.onActivity { activity ->
+                val help = field<Dialog>(activity, "quickstartDialog")
+                val root = help.findViewById<View>(android.R.id.content)
+                descendants(root).single { it.contentDescription == activity.getString(R.string.help_back) }.performClick()
+                assertNull(field<Dialog?>(activity, "quickstartDialog"))
+                assertTrue(field<Dialog>(activity, "libraryDialog").isShowing)
+                assertTrue(field<List<BookRecord>>(activity, "books").isEmpty())
+                assertTrue(field<List<ReaderTab>>(activity, "tabs").isEmpty())
+                assertEquals(0, field<BookmarkIndex>(activity, "bookmarkIndex").size)
+            }
+            openLibraryMenu()
+            clickMenuItem(3) // Help follows the existing Library settings/diagnostics entries.
+            awaitQuickstart()
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+            scenario!!.onActivity { assertTrue(field<Dialog>(it, "libraryDialog").isShowing) }
+            scenario!!.close()
+            scenario = null
+        }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 29)
+    fun readerHelpLeavesTabsReferenceSearchAndLibraryFilterAlone() {
+        scenario = ActivityScenario.launch(MainActivity::class.java)
+        awaitReady()
+        await { TextSearchIndexRepository.shared(context).progress(book.id)?.complete == true }
+        // Keep a real full-text reference open underneath help.
+        scenario!!.onActivity { field<View>(it, "searchButton").performLongClick() }
+        instrumentation.waitForIdleSync()
+        scenario!!.onActivity { activity ->
+            val root = WindowInspector.getGlobalWindowViews().last { view -> descendants(view).any { it is EditText } }
+            descendants(root).filterIsInstance<EditText>().single().apply {
+                showSoftInputOnFocus = false
+                setText("башню")
+            }
+            textView(root, activity.getString(R.string.search_all_text)).performClick()
+        }
+        await {
+            var ready = false
+            scenario!!.onActivity { ready = field<ListView>(it, "referenceSearchList").adapter.count > 0 }
+            ready
+        }
+        var tabs: List<ReaderTab>? = null
+        var reference: Any? = null
+        var bookmarkCount = 0
+        var indexRun: String? = null
+        val visits = ReaderSessionRepository(context).loadBookmarkVisits()
+        scenario!!.onActivity { activity ->
+            tabs = field<List<ReaderTab>>(activity, "tabs").toList()
+            reference = field(activity, "textSearchSession")
+            bookmarkCount = field<BookmarkIndex>(activity, "bookmarkIndex").size
+            indexRun = TextSearchIndexRepository.shared(context).progress(book.id)?.indexRunId
+            invoke(activity, "showReaderMenu")
+        }
+        instrumentation.waitForIdleSync()
+        var helpIndex = -1
+        scenario!!.onActivity { helpIndex = menuItems().indexOf(it.getString(R.string.quickstart_menu)) }
+        assertTrue(helpIndex >= 0)
+        clickMenuItem(helpIndex)
+        awaitQuickstart()
+        instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        scenario!!.onActivity { activity ->
+            assertNull(field<Dialog?>(activity, "quickstartDialog"))
+            assertEquals(tabs, field<List<ReaderTab>>(activity, "tabs"))
+            assertSame(reference, field<Any>(activity, "textSearchSession"))
+            assertEquals(bookmarkCount, field<BookmarkIndex>(activity, "bookmarkIndex").size)
+            assertEquals(indexRun, TextSearchIndexRepository.shared(context).progress(book.id)?.indexRunId)
+            invoke(activity, "showLibrary")
+            textView(field(activity, "libraryTagStrip"), activity.getString(R.string.untagged)).performClick()
+            assertTrue(field<List<BookRecord>>(activity, "libraryVisibleBooks").isEmpty())
+            assertEquals(View.GONE, field<View>(activity, "libraryQuickstartButton").visibility)
+            invoke(activity, "showQuickstart")
+        }
+        awaitQuickstart()
+        instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        scenario!!.onActivity {
+            assertTrue(field<Dialog>(it, "libraryDialog").isShowing)
+            assertTrue(field<List<BookRecord>>(it, "libraryVisibleBooks").isEmpty())
+        }
+        assertEquals(visits, ReaderSessionRepository(context).loadBookmarkVisits())
+    }
+
+    private fun awaitQuickstart() = await {
+        var loaded = false
+        scenario!!.onActivity { activity ->
+            val dialog = field<Dialog?>(activity, "quickstartDialog")
+            val root = dialog?.findViewById<View>(android.R.id.content)
+            loaded = dialog?.isShowing == true && root != null &&
+                textView(root, activity.getString(R.string.help_contents)).isEnabled
+        }
+        loaded
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 29)
     fun searchAndReferenceControlsFitAndKeepCyrillicQuery() {
         val failures = mutableListOf<String>()
         for (language in listOf("en", "ru")) {
@@ -344,6 +486,15 @@ class LocalizationUiTest {
                     val name = "$language-search-$width-$fontScale-$theme"
                     layout(content, width, 600)
                     capture(content, "$name-navigate")
+                    val referenceAction = descendants(content).filterIsInstance<TextView>().single {
+                        it.contentDescription == activity.getString(R.string.open_reference_description, book.pdfBookmarks.first().title)
+                    }
+                    assertEquals(if (width < 600) "⬒" else "◨", referenceAction.text.toString())
+                    assertEquals(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,
+                        20f, activity.resources.displayMetrics), referenceAction.textSize, 0.01f)
+                    val referenceButtonSize = (48 * activity.resources.displayMetrics.density).toInt()
+                    assertEquals(referenceButtonSize, referenceAction.layoutParams.width)
+                    assertEquals(referenceButtonSize, referenceAction.layoutParams.height)
                     for (id in listOf(R.string.navigate, R.string.full_text, R.string.all)) {
                         val view = textView(content, activity.getString(id))
                         if (!singleLineFits(view) || !inside(view, content)) failures += "$name: ${view.text} is clipped"
@@ -674,10 +825,11 @@ class LocalizationUiTest {
     private fun assertLibraryMenu() {
         scenario!!.onActivity { activity ->
             val items = menuItems()
-            assertEquals(3, items.size)
+            assertEquals(4, items.size)
             assertTrue(items[0].startsWith(activity.getString(R.string.reading_view)))
             assertTrue(items[1].startsWith(activity.getString(R.string.interface_menu)))
             assertTrue(items[2].startsWith(activity.getString(R.string.diagnostics)))
+            assertEquals(activity.getString(R.string.quickstart_menu), items[3])
         }
     }
 
