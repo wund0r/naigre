@@ -517,4 +517,14 @@
   <string name="save_library_failed">Не удалось сохранить библиотеку</string>
   <string name="save_item_index_failed">Не удалось сохранить индекс материала</string>
   <string name="delete_item_index_failed">Не удалось удалить индекс материала</string>
+  <string name="wiki_link_invalid">Некорректная ссылка: %1$s. Укажи имя файла или имя PDF с #page=12.</string>
+  <string name="wiki_link_missing">%1$s не найден на столе или в библиотеке.</string>
+  <string name="wiki_link_changed">Цель ссылки изменилась. Нажми ссылку ещё раз.</string>
+  <string name="wiki_link_index_unavailable">Не удалось загрузить сведения об альбомах для поиска %1$s.</string>
+  <string name="wiki_link_loading">Поиск изображения по ссылке…</string>
+  <string name="wiki_link_choose_target">Выбери цель ссылки</string>
+  <string name="wiki_link_add_book_message">«%1$s» есть в библиотеке, но не на столе. Добавить книгу на стол и открыть ссылку?</string>
+  <string name="wiki_link_add_album_message">«%1$s» находится в альбоме «%2$s», которого нет на столе. Добавить альбом на стол и открыть изображение?</string>
+  <string name="wiki_link_add_book">Добавить книгу и открыть</string>
+  <string name="wiki_link_add_album">Добавить альбом и открыть</string>
 </resources>

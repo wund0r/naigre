@@ -65,6 +65,11 @@ import wund0r.naigre.reader.navigation.TabLabelKind
 import wund0r.naigre.reader.navigation.TabTitle
 import wund0r.naigre.reader.markdown.MarkdownDocument
 import wund0r.naigre.reader.markdown.MarkdownEngine
+import wund0r.naigre.reader.markdown.WikiLinkSpec
+import wund0r.naigre.reader.markdown.WikiLinkResolver
+import wund0r.naigre.reader.markdown.WikiLinkResolution
+import wund0r.naigre.reader.markdown.WikiLinkDestination
+import wund0r.naigre.reader.markdown.MARKDOWN_CONTENT_VERSION
 import wund0r.naigre.reader.pdf.ImageCollectionDocument
 import wund0r.naigre.reader.pdf.DocumentReadException
 import wund0r.naigre.reader.pdf.ImageDecodePolicy
@@ -394,8 +399,10 @@ class MainActivity : Activity() {
     private var pendingPrimaryViewportRestore: PendingViewportRestore? = null
     private var pendingReferenceViewportRestore: PendingViewportRestore? = null
     private var referenceMarkdownState = MarkdownSurface.ReadingState()
+    private var wikiLinkGeneration = 0
 
     private lateinit var root: FrameLayout
+    private var readerEdgeInsets = EdgeInsets(0, 0, 0, 0)
     private lateinit var readerContainer: LinearLayout
     private lateinit var primaryPane: FrameLayout
     private lateinit var referencePane: FrameLayout
@@ -595,6 +602,8 @@ class MainActivity : Activity() {
             .sortedBy { if (it.id == activeId) 0 else 1 }
         if (requests.isEmpty()) {
             if (tabs.isNotEmpty()) activateCurrentTab()
+            selectedBooks().filter { it.kind == LibraryItemKind.MARKDOWN && it.markdownContentVersion < MARKDOWN_CONTENT_VERSION && it.id != activeId }
+                .forEach { refreshMarkdownBook(it, notify = false) }
             scheduleSelectedBookTextIndexes()
             return
         }
@@ -620,6 +629,8 @@ class MainActivity : Activity() {
                         scheduleBookTextIndex(merged)
                         if (activeTabOrNull()?.bookId == snapshot.id && pdf == null) {
                             activateCurrentTab()
+                        } else if (merged.kind == LibraryItemKind.MARKDOWN && merged.markdownContentVersion < MARKDOWN_CONTENT_VERSION) {
+                            refreshMarkdownBook(merged, notify = false)
                         }
                     }
                     is BookIndexLoadResult.Missing -> {
@@ -837,9 +848,10 @@ class MainActivity : Activity() {
             ),
         )
         primaryMarkdownSurface = MarkdownSurface(this).apply {
-            setUiColors(uiPalette.background, uiPalette.textPrimary)
+            setUiColors(uiPalette.background, uiPalette.textPrimary, uiPalette.accent)
             visibility = View.GONE
             onBlankTap = { toggleChrome() }
+            onWikiLink = { spec, alongside -> openWikiLink(spec, alongside, primaryMarkdownSurface) }
         }
         primaryPane.addView(
             primaryMarkdownSurface,
@@ -880,9 +892,10 @@ class MainActivity : Activity() {
             ),
         )
         referenceMarkdownSurface = MarkdownSurface(this).apply {
-            setUiColors(uiPalette.background, uiPalette.textPrimary)
+            setUiColors(uiPalette.background, uiPalette.textPrimary, uiPalette.accent)
             visibility = View.GONE
             onBlankTap = { toggleChrome() }
+            onWikiLink = { spec, alongside -> openWikiLink(spec, alongside, referenceMarkdownSurface) }
         }
         referencePane.addView(
             referenceMarkdownSurface,
@@ -1345,6 +1358,9 @@ class MainActivity : Activity() {
 
         root.setOnApplyWindowInsetsListener { _, insets ->
             val edges = edgeInsets(insets)
+            // These are the insets still overlapping our content after the decor fits
+            // system bars. rootWindowInsets also includes bars already outside the root.
+            readerEdgeInsets = edges
             val tall = resolvedReaderLayout() == ReaderLayoutMode.TALL
             (searchButton.layoutParams as FrameLayout.LayoutParams).also { params ->
                 params.bottomMargin = dp(8 - CHROME_VERTICAL_INSET_DP) + edges.bottom
@@ -1402,6 +1418,7 @@ class MainActivity : Activity() {
         renderTabBar()
         updatePageIndicator()
         updateNavigationControls()
+        applyMarkdownInsets()
         applyChromeVisibility()
     }
 
@@ -1502,40 +1519,28 @@ class MainActivity : Activity() {
         if (!::primaryMarkdownSurface.isInitialized || !::referenceMarkdownSurface.isInitialized) return
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).roundToInt()
-        val edges = if (::root.isInitialized) {
-            root.rootWindowInsets?.let(::edgeInsets) ?: EdgeInsets(0, 0, 0, 0)
-        } else {
-            EdgeInsets(0, 0, 0, 0)
-        }
+        val edges = readerEdgeInsets
         val tall = resolvedReaderLayout() == ReaderLayoutMode.TALL
         val hasReference = hasReferencePane()
         val primaryTouchesTop = !hasReference || !tall
-        val primaryContainsSearch = !hasReference || tall
-        val primaryTop = (if (primaryTouchesTop) edges.top else 0) +
-            if (primaryTouchesTop && chromeVisible) dp(68) else dp(20)
-        val primaryBottom = if (primaryContainsSearch) {
-            dp(CHROME_SURFACE_HEIGHT_DP + 24) + edges.bottom
-        } else {
-            dp(32) + edges.bottom + if (chromeVisible) dp(60) else 0
-        }
-        val referenceTop = edges.top +
-            if (chromeVisible && hasReference) dp(68) else dp(20)
-        val referenceBottom = if (tall) {
-            dp(20)
-        } else {
-            dp(CHROME_SURFACE_HEIGHT_DP + 24) + edges.bottom
-        }
+        // Reader controls overlay Markdown, as they do PDFs. Their visibility must
+        // not change the document's margins, viewport or available scroll range.
+        val primaryTop = (if (primaryTouchesTop) edges.top else 0) + dp(20)
+        val primaryEndPadding = dp(CHROME_SURFACE_HEIGHT_DP + 24)
+        val referenceTop = edges.top + dp(20)
         primaryMarkdownSurface.setContentInsets(
             edges.left + dp(20),
             primaryTop,
-            edges.right + dp(20),
-            primaryBottom,
+            (if (!hasReference || tall) edges.right else 0) + dp(20),
+            edges.bottom,
+            primaryEndPadding,
         )
         referenceMarkdownSurface.setContentInsets(
-            edges.left + dp(20),
+            (if (tall) edges.left else 0) + dp(20),
             referenceTop,
             edges.right + dp(20),
-            referenceBottom,
+            if (tall) 0 else edges.bottom,
+            dp(if (tall) 20 else CHROME_SURFACE_HEIGHT_DP + 24),
         )
     }
 
@@ -2014,14 +2019,17 @@ class MainActivity : Activity() {
                 hydrated.sourceRevisionToken
             },
             tagIds = hydrated?.tagIds.orEmpty(),
+            sourceRelativePath = markdownDocument.relativePath(),
         )
         val contentChanged = hydrated == null ||
             !hydrated.indexLoaded ||
             hydrated.uri != updated.uri ||
             hydrated.sourceFingerprint != updated.sourceFingerprint ||
+            hydrated.markdownContentVersion != updated.markdownContentVersion ||
             hydrated.indexVersion < CURRENT_BOOK_INDEX_VERSION
         val metadataChanged = hydrated != null && (
             hydrated.fileName != updated.fileName ||
+                hydrated.sourceRelativePath != updated.sourceRelativePath ||
                 hydrated.sourceSize != updated.sourceSize ||
                 hydrated.sourceLastModified != updated.sourceLastModified
             )
@@ -2107,6 +2115,8 @@ class MainActivity : Activity() {
             )
         }
 
+        updated = updated.copy(sourceRelativePath = pdfDocument.relativePath())
+
         var tocImported = false
         var rejectedTocLines = 0
         if (tocDocument != null) {
@@ -2152,6 +2162,7 @@ class MainActivity : Activity() {
 
         val metadataChanged = existing != null && (
                 existing.fileName != updated.fileName ||
+                existing.sourceRelativePath != updated.sourceRelativePath ||
                 existing.sourceSize != updated.sourceSize ||
                 existing.sourceLastModified != updated.sourceLastModified ||
                 existing.externalTocSize != updated.externalTocSize ||
@@ -2217,9 +2228,11 @@ class MainActivity : Activity() {
                 hydrated.sourceRevisionToken
             },
             tagIds = hydrated?.tagIds.orEmpty(),
+            sourceRelativePath = first.relativeDirectory,
         )
         val changed = hydrated == null ||
             hydrated.title != updated.title || hydrated.fileName != updated.fileName ||
+            hydrated.sourceRelativePath != updated.sourceRelativePath ||
             hydrated.imageFiles != updated.imageFiles || hydrated.indexVersion < CURRENT_BOOK_INDEX_VERSION
         if (!changed) return null
         return FolderBookChange(
@@ -2850,12 +2863,16 @@ class MainActivity : Activity() {
                     uri = uri.toString(),
                     pageCount = opened.pageCount,
                     pdfBookmarks = headings,
+                    sourceRelativePath = hydrated.sourceRelativePath.takeIf {
+                        hydrated.uri == uri.toString() && (metadata.fileName == null || metadata.fileName == hydrated.fileName)
+                    },
                     storedBookmarkCount = headings.distinctBy { it.identityKey }.size,
                     indexVersion = CURRENT_BOOK_INDEX_VERSION,
                     indexLoaded = true,
                     sourceSize = metadata.size,
                     sourceLastModified = metadata.lastModified,
                     sourceFingerprint = opened.content.fingerprint,
+                    markdownContentVersion = MARKDOWN_CONTENT_VERSION,
                     sourceRevisionToken = UUID.randomUUID().toString(),
                 )
                 mainHandler.post {
@@ -2964,6 +2981,9 @@ class MainActivity : Activity() {
                     uri = uri.toString(),
                     pageCount = opened.pageCount,
                     pdfBookmarks = outlineEntries(opened, bookId),
+                    sourceRelativePath = hydratedOld.sourceRelativePath.takeIf {
+                        hydratedOld.uri == uri.toString() && (inspectedMetadata.fileName == null || inspectedMetadata.fileName == hydratedOld.fileName)
+                    },
                     externalBookmarks = hydratedOld.externalBookmarks.filter { it.pageIndex < opened.pageCount },
                     indexVersion = CURRENT_BOOK_INDEX_VERSION,
                     indexLoaded = true,
@@ -3249,7 +3269,8 @@ class MainActivity : Activity() {
                     sourceMetadataNeedsUpdate(book, metadata)
                 val shouldRefreshIndex = isTextSearchable(book) && (
                     forceMetadataRefresh || sourceChanged || !book.indexLoaded ||
-                        book.indexVersion < CURRENT_BOOK_INDEX_VERSION
+                        book.indexVersion < CURRENT_BOOK_INDEX_VERSION ||
+                        book.kind == LibraryItemKind.MARKDOWN && book.markdownContentVersion < MARKDOWN_CONTENT_VERSION
                     )
                 val refreshedOutline = if (shouldRefreshIndex) {
                     try {
@@ -3296,6 +3317,9 @@ class MainActivity : Activity() {
                             }
                             val sourceResult = current.copy(
                                     fileName = metadata.fileName ?: current.fileName,
+                                    sourceRelativePath = current.sourceRelativePath.takeIf {
+                                        metadata.fileName == null || metadata.fileName == current.fileName
+                                    },
                                     title = metadata.fileName?.let(::cleanBookName) ?: current.title,
                                     pageCount = if (refreshedOutline != null) liveDocument.pageCount else current.pageCount,
                                     pdfBookmarks = refreshedOutline ?: current.pdfBookmarks,
@@ -3314,6 +3338,7 @@ class MainActivity : Activity() {
                                     sourceSize = metadata.size ?: current.sourceSize,
                                     sourceLastModified = metadata.lastModified ?: current.sourceLastModified,
                                     sourceFingerprint = liveFingerprint ?: current.sourceFingerprint,
+                                    markdownContentVersion = if (liveFingerprint != null) MARKDOWN_CONTENT_VERSION else current.markdownContentVersion,
                                     sourceRevisionToken = if (forceMetadataRefresh || sourceChanged) {
                                         UUID.randomUUID().toString()
                                     } else {
@@ -3814,6 +3839,141 @@ class MainActivity : Activity() {
         renderReference()
     }
 
+    private fun openWikiLink(spec: WikiLinkSpec, alongside: Boolean, source: MarkdownSurface) {
+        if (!requireCatalogReady()) return
+        val generation = ++wikiLinkGeneration
+        val state = if (source === primaryMarkdownSurface) primaryMarkdownStates[activeTabOrNull()] else referenceMarkdownState
+        val current = {
+            !destroying && !isDestroyed && generation == wikiLinkGeneration &&
+                source.visibility == View.VISIBLE && source.isShowing(state)
+        }
+        if (!spec.valid) {
+            Toast.makeText(this, getString(R.string.wiki_link_invalid, spec.target), Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        fun lookup(onTable: Boolean) {
+            if (!current()) return
+            val selection = selectedBookIds.toSet()
+            val scope = books.filter { (it.id in selection) == onTable }
+            val tokens = scope.associate { it.id to tableSessionController.captureContentOperation(it.id) }
+            val pending = scope.filter {
+                it.kind == LibraryItemKind.IMAGE_COLLECTION && !it.indexLoaded && WikiLinkResolver.mayContain(spec, it)
+            }
+            val resolve: (List<BookIndexLoadResult>) -> Unit = resolve@{ results ->
+                if (!current()) return@resolve
+                val latestScope = books.filter { (it.id in selectedBookIds) == onTable }
+                if (selection != selectedBookIds || latestScope.map { it.id }.toSet() != tokens.keys ||
+                    tokens.values.any { !tableSessionController.isContentOperationCurrent(it) }) {
+                    lookup(true)
+                    return@resolve
+                }
+                if (results.any { it !is BookIndexLoadResult.Loaded }) {
+                    Toast.makeText(this, getString(R.string.wiki_link_index_unavailable, spec.target), Toast.LENGTH_LONG).show()
+                    return@resolve
+                }
+                val hydrated = results.filterIsInstance<BookIndexLoadResult.Loaded>().associate { it.book.id to it.book }
+                val candidates = latestScope.map { book -> hydrated[book.id]?.let { mergeHydratedBookIndex(book, it) } ?: book }
+                when (val result = WikiLinkResolver.resolve(spec, candidates, selectedBookIds)) {
+                    is WikiLinkResolution.Matches -> {
+                        val choose: (WikiLinkDestination) -> Unit = { destination ->
+                            val book = candidates.first { it.id == destination.bookId }
+                            openWikiDestination(spec, destination, book, tokens.getValue(book.id), alongside, current)
+                        }
+                        if (result.destinations.size == 1) choose(result.destinations.single())
+                        else {
+                            val labels = result.destinations.map { destination ->
+                                val book = candidates.first { it.id == destination.bookId }
+                                val folder = libraryFolders.firstOrNull { it.uri == book.uri.substringBefore("/document/") }?.label
+                                val tags = libraryTags.filter { it.id in book.tagIds }.map { it.name }
+                                val imageName = destination.imageUri?.let { uri -> book.imageFiles.firstOrNull { it.uri == uri }?.fileName }
+                                val label = (listOfNotNull(book.title, book.sourceRelativePath?.takeIf { it.isNotBlank() }, imageName, folder) + tags)
+                                    .distinct().joinToString(" · ")
+                                SpannableString("● $label").apply {
+                                    setSpan(ForegroundColorSpan(book.color), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                                }
+                            }.toTypedArray<CharSequence>()
+                            AlertDialog.Builder(this).setTitle(R.string.wiki_link_choose_target)
+                                .setItems(labels) { _, index -> if (current()) choose(result.destinations[index]) }
+                                .setNegativeButton(R.string.cancel, null).show()
+                        }
+                    }
+                    WikiLinkResolution.Missing -> if (onTable) lookup(false) else {
+                        Toast.makeText(this, getString(R.string.wiki_link_missing, spec.path), Toast.LENGTH_LONG).show()
+                    }
+                    WikiLinkResolution.Invalid -> Unit // Checked before loading any indexes.
+                }
+            }
+            if (pending.isEmpty()) resolve(emptyList()) else {
+                setStatus(getString(R.string.wiki_link_loading))
+                libraryStorage.loadIndexes(pending, resolve)
+            }
+        }
+        lookup(true)
+    }
+
+    private fun openWikiDestination(
+        spec: WikiLinkSpec,
+        destination: WikiLinkDestination,
+        snapshot: BookRecord,
+        token: BookOperationToken,
+        alongside: Boolean,
+        current: () -> Boolean,
+        addApproved: Boolean = false,
+    ) {
+        if (!current()) return
+        val latest = bookById(snapshot.id)
+        if (latest == null || latest.uri != snapshot.uri || !tableSessionController.isContentOperationCurrent(token) ||
+            !WikiLinkResolver.mayContain(spec, latest)) {
+            Toast.makeText(this, R.string.wiki_link_changed, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val book = if (latest.indexLoaded) latest else mergeHydratedBookIndex(latest, snapshot)
+        val entry = destination.entry(book, spec)
+        if (entry == null) {
+            val message = if (spec.hasPage) getString(R.string.page_range_error, book.pageCount) else getString(R.string.wiki_link_changed)
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            return
+        }
+        if (book.id !in selectedBookIds && !addApproved) {
+            val image = destination.imageUri != null
+            val message = if (image) getString(R.string.wiki_link_add_album_message, spec.label, book.title)
+                else getString(R.string.wiki_link_add_book_message, book.title)
+            AlertDialog.Builder(this).setMessage(message)
+                .setPositiveButton(if (image) R.string.wiki_link_add_album else R.string.wiki_link_add_book) { _, _ ->
+                    openWikiDestination(spec, destination, snapshot, token, alongside, current, addApproved = true)
+                }
+                .setNegativeButton(R.string.cancel, null).show()
+            return
+        }
+        replaceBook(book)
+        if (book.id !in selectedBookIds) applyTableSelectionIntent(selectedBookIds + book.id)
+        scheduleBookTextIndex(book)
+        if (alongside) {
+            if (referenceLocation?.anchorKey != entry.identityKey) openBookmarkAlongside(entry)
+            if (book.kind == LibraryItemKind.MARKDOWN && book.markdownContentVersion < MARKDOWN_CONTENT_VERSION) {
+                refreshMarkdownBook(book, notify = false)
+            }
+            return
+        }
+        clearActiveSearchHighlight()
+        capturePrimaryImageViewport()
+        val existing = tabs.indexOfFirst {
+            it.anchorKey == entry.identityKey || it.bookId == entry.bookId && when {
+                destination.imageUri == null && entry.pageIndex == 0 && it.anchorKey == null && it.labelKind == TabLabelKind.START -> true
+                spec.hasPage -> it.anchorKey in setOf("${book.id}|link:${entry.pageIndex}", "${book.id}|link:${entry.pageIndex}:0")
+                else -> false
+            }
+        }
+        if (existing >= 0) switchToTab(existing) else {
+            tabs += ReaderTab(entry.bookId, entry.pageIndex, entry.title, entry.identityKey)
+            activeTabIndex = tabs.lastIndex
+            currentPage = entry.pageIndex
+            persistSession()
+            activateCurrentTab()
+        }
+    }
+
     private fun openPdfLink(bookId: String, link: PdfLinkInfo) {
         val book = bookById(bookId) ?: return
         val targetPage = link.targetPageIndex.coerceIn(0, book.pageCount - 1)
@@ -3906,6 +4066,10 @@ class MainActivity : Activity() {
             // Upgrade a tab created by an older naming fallback instead of duplicating it
             // when the newly resolved bookmark changes its canonical anchor identity.
             existing = tabs.indexOfFirst { it.anchorKey == destinationAnchorKey }
+        }
+        if (existing < 0 && (link.targetY == null || link.targetY == 0f) && link.destinationKey == null) {
+            val wikiAnchor = if (targetPage == 0) "$bookId|anchor:file-root" else "$bookId|anchor:wiki-page:$targetPage"
+            existing = tabs.indexOfFirst { it.anchorKey == wikiAnchor }
         }
         if (existing >= 0) {
             val existingTab = tabs[existing]
@@ -6229,9 +6393,7 @@ class MainActivity : Activity() {
             ) View.VISIBLE else View.INVISIBLE
         updateNavigationControls()
         updateReferenceIndicator()
-        applyMarkdownInsets()
-        root.requestApplyInsets()
-        // Deliberately do not alter system bars or resize the bitmap reader surface.
+        // Only the controls change; both bitmap and Markdown documents stay in place.
     }
 
     private fun nextBookColor(): Int {
@@ -6421,6 +6583,9 @@ class MainActivity : Activity() {
         }
         if (book.indexLoaded) {
             scheduleBookTextIndex(book)
+            if (!openAfter && book.id != activeTabOrNull()?.bookId && book.kind == LibraryItemKind.MARKDOWN && book.markdownContentVersion < MARKDOWN_CONTENT_VERSION) {
+                refreshMarkdownBook(book, notify = false)
+            }
             if (openAfter) openBookInTab(bookId)
             refreshLibraryUi()
             return
@@ -6457,6 +6622,9 @@ class MainActivity : Activity() {
             rebuildBookmarkIndex()
             refreshLibraryUi()
             if (merged.indexLoaded) scheduleBookTextIndex(merged)
+            if (!openAfter && merged.id != activeTabOrNull()?.bookId && merged.kind == LibraryItemKind.MARKDOWN && merged.markdownContentVersion < MARKDOWN_CONTENT_VERSION) {
+                refreshMarkdownBook(merged, notify = false)
+            }
             refreshTextSearchScope()
             if (openAfter) {
                 openBookInTab(bookId)
@@ -7385,7 +7553,7 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun refreshMarkdownBook(book: BookRecord) {
+    private fun refreshMarkdownBook(book: BookRecord, notify: Boolean = true) {
         val snapshot = bookById(book.id) ?: return
         val contentToken = tableSessionController.beginContentOperation(book.id)
         setStatus(getString(R.string.refreshing_item, snapshot.title))
@@ -7412,6 +7580,7 @@ class MainActivity : Activity() {
                     sourceSize = metadata.size ?: hydrated.sourceSize,
                     sourceLastModified = metadata.lastModified ?: hydrated.sourceLastModified,
                     sourceFingerprint = opened.content.fingerprint,
+                    markdownContentVersion = MARKDOWN_CONTENT_VERSION,
                     sourceRevisionToken = UUID.randomUUID().toString(),
                 )
                 mainHandler.post {
@@ -7435,7 +7604,7 @@ class MainActivity : Activity() {
                     lastSourceRefreshDiagnostic = sourceRefreshDiagnostic(
                         book = current,
                         metadata = metadata,
-                        reason = "Manual note refresh",
+                        reason = if (notify) "Manual note refresh" else "Markdown renderer updated",
                         nextRevision = accepted.sourceRevisionKey(),
                     )
                     val destinations = headings.associateBy { it.identityKey }
@@ -7462,7 +7631,7 @@ class MainActivity : Activity() {
                     } else if (referenceLocation?.bookId == snapshot.id) {
                         renderReference()
                     }
-                    Toast.makeText(this, getString(R.string.item_refreshed, accepted.title), Toast.LENGTH_SHORT).show()
+                    if (notify) Toast.makeText(this, getString(R.string.item_refreshed, accepted.title), Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
                 if (tableSessionController.isContentOperationCurrent(contentToken)) {

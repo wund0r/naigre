@@ -18,7 +18,7 @@ Portions of this software are copyright (C) 2026 The FreeType Project
 (https://freetype.org). All rights reserved. FreeType is used under the FTL.
 This software is based in part on the work of the Independent JPEG Group.
 
-Markwon core and ext-tables (io.noties.markwon, version 4.6.2)
+Markwon core, ext-tables and inline-parser (io.noties.markwon, version 4.6.2)
 By Dimitry Ivanov and contributors; Apache License 2.0.
 Source: https://github.com/noties/Markwon/tree/v4.6.2
 License: licenses/Apache-2.0.txt

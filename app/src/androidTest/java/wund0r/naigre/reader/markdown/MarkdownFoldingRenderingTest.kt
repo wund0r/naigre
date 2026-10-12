@@ -3,6 +3,8 @@
 package wund0r.naigre.reader.markdown
 
 import android.os.SystemClock
+import android.text.Selection
+import android.text.Spannable
 import android.text.Spanned
 import android.text.style.BackgroundColorSpan
 import android.view.MotionEvent
@@ -138,12 +140,85 @@ class MarkdownFoldingRenderingTest {
         surface.clear()
     }
 
+    @Test
+    fun foldingKeepsScrolledHeadingInPlaceWhenCursorRevealRunsAfterRestore() {
+        lateinit var surface: MarkdownSurface
+        lateinit var scroll: ScrollView
+        var scrollY = 0
+        onMain {
+            val engine = engine()
+            val body = (1..40).joinToString("\n\n") { "Paragraph $it." }
+            val content = engine.parse("# Before\n\n$body\n\n# Fold here\n\nBody to fold.\n\n# After\n\n$body")
+            surface = MarkdownSurface(instrumentation.targetContext)
+            surface.showContent(engine, content, 0, MarkdownSurface.ReadingState())
+            layout(surface)
+            scroll = surface.getChildAt(0) as ScrollView
+            val target = text(surface)
+            assertTrue(target.requestFocus())
+            val section = content.sections.first { it.title == "Fold here" }
+            val line = target.layout.getLineForOffset(section.start)
+            val headingY = target.layout.getLineTop(line)
+            scroll.scrollTo(0, headingY - 100)
+            scrollY = scroll.scrollY
+            assertTrue(scrollY > 0)
+            surface.toggleHeading(section.index)
+            layout(surface) {
+                // TextView may register during measure, after the viewport listener.
+                Selection.setSelection(target.text as Spannable, 0)
+                target.viewTreeObserver.removeOnPreDrawListener(target)
+                target.viewTreeObserver.addOnPreDrawListener(target)
+            }
+            assertEquals(scrollY, scroll.scrollY)
+        }
+        // Cursor reveal uses a smooth ScrollView animation; check its final position too.
+        SystemClock.sleep(350)
+        onMain {
+            scroll.computeScroll()
+            assertEquals(scrollY, scroll.scrollY)
+            val target = text(surface)
+            val line = target.layout.getLineForOffset(target.text.indexOf("Fold here"))
+            assertEquals(100, target.layout.getLineTop(line) - scroll.scrollY)
+            surface.clear()
+        }
+    }
+
+    @Test
+    fun normalSelectionCanStillScrollAfterDocumentRestore() {
+        lateinit var surface: MarkdownSurface
+        lateinit var scroll: ScrollView
+        var before = 0
+        onMain {
+            val engine = engine()
+            val content = engine.parse("# Heading\n\n" + (1..60).joinToString("\n\n") { "Paragraph $it." })
+            surface = MarkdownSurface(instrumentation.targetContext)
+            surface.showContent(engine, content, 0, MarkdownSurface.ReadingState())
+            layout(surface)
+            val target = text(surface)
+            assertTrue(target.requestFocus())
+            layout(surface)
+            scroll = surface.getChildAt(0) as ScrollView
+            scroll.scrollTo(0, target.height / 2)
+            before = scroll.scrollY
+            assertTrue(before > 0)
+            Selection.setSelection(target.text as Spannable, target.text.length)
+            Selection.setSelection(target.text as Spannable, 0)
+            layout(surface)
+        }
+        SystemClock.sleep(350)
+        onMain {
+            scroll.computeScroll()
+            assertTrue(scroll.scrollY < before)
+            surface.clear()
+        }
+    }
+
     private fun engine() = MarkdownEngine(instrumentation.targetContext)
     private fun text(surface: MarkdownSurface) = (surface.getChildAt(0) as ScrollView).getChildAt(0) as TextView
-    private fun layout(surface: MarkdownSurface) {
+    private fun layout(surface: MarkdownSurface, beforeDraw: () -> Unit = {}) {
         surface.measure(View.MeasureSpec.makeMeasureSpec(700, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(900, View.MeasureSpec.EXACTLY))
         surface.layout(0, 0, 700, 900)
+        beforeDraw()
         text(surface).viewTreeObserver.dispatchOnPreDraw()
     }
     private fun tables(text: Spanned) = text.getSpans(0, text.length, Any::class.java)

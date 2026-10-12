@@ -47,8 +47,8 @@ android {
         targetSdk = 36
         // YY.MM.release: increment the final number for every release within the month.
         // versionCode never resets, even when the calendar month changes.
-        versionCode = 64
-        versionName = "26.10.0"
+        versionCode = 65
+        versionName = "26.10.1"
         testInstrumentationRunner = "wund0r.naigre.reader.LocalizationTestRunner"
     }
 
@@ -251,6 +251,7 @@ tasks.register("createReleaseKey") {
 dependencies {
     implementation("com.artifex.mupdf:fitz:1.28.0")
     implementation("io.noties.markwon:core:4.6.2")
+    implementation("io.noties.markwon:inline-parser:4.6.2")
     implementation("io.noties.markwon:ext-tables:4.6.2")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.7.0")

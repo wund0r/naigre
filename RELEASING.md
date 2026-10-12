@@ -24,43 +24,6 @@ The single version source is `app/build.gradle.kts`:
 All retain the source namespace `wund0r.naigre.reader`. Do not change the public
 application ID or casually regenerate its key after distribution.
 
-## Create a signing key once
-
-Linux/JDK 17+ example; pick a **new directory outside the repository**:
-
-```sh
-./gradlew :app:createReleaseKey -PnaigreKeyDirectory="$HOME/.local/share/naigre/signing"
-```
-
-This creates a 3072-bit RSA PKCS12 key valid for 30 years, with alias `naigre`
-and public certificate subject `CN=NaIgre`. A cryptographically random password is
-saved in `release.properties`, not printed or passed as a command-line argument.
-The directory has mode `700`; the key and credentials have mode `600`.
-The task refuses an existing directory. Do not delete or replace a real key to rerun it.
-
-Select the configuration for release commands:
-
-```sh
-export NAIGRE_SIGNING_PROPERTIES="$HOME/.local/share/naigre/signing/release.properties"
-./gradlew :app:checkReleaseKey
-```
-
-For an existing key, create a private Java properties file outside the repository
-containing `storeFile` (absolute path), `storeType` (`PKCS12` or `JKS`),
-`storePassword`, `keyAlias` and `keyPassword`, then point the environment variable
-at it. Respect Java properties escaping; the key-generation task handles this automatically.
-
-**Back up both the keystore and its credentials to an independent, secure location**
-(for example encrypted offline storage). The generated credentials file contains
-the password, so possession of both files gives signing authority. Permissions on
-this laptop are not a backup. Check the backup can be read and record the signing
-certificate's SHA-256 fingerprint from `release-info.txt`. Never publish either
-private file, paste its contents into an issue, or include it in build logs/scans.
-If restored to another location, update `storeFile` in the private configuration.
-
-Future updates must use this key. Losing it is not something Obtainium can repair.
-See [Android app signing](https://developer.android.com/studio/publish/app-signing).
-
 ## Build and verify a release candidate
 
 Set the Android SDK location as described in the README, then:
@@ -99,32 +62,43 @@ Without `NAIGRE_SIGNING_PROPERTIES`, debug and verification builds work normally
 `preparePublicRelease` refuses missing credentials. Never upload an unsigned artifact,
 `app-debug.apk`, or the verification APK. Minification/resource shrinking remain disabled.
 
-## Acceptance before publishing
 
-Current candidate: **26.09.1 (64)**, updating the published **26.09.0 (63)**.
-Use [the prepared release notes](releases/26.09.1.md) after acceptance. The draft
-source-tag links become valid only after the matching source is committed/tagged
-and pushed. Keep the GitHub release marked **Prerelease** during beta.
+## Create a signing key once
 
-For this update, pay particular attention to preserved library/tags/visits/tabs,
-Russian UI and large-font layouts, preview loading with real campaign folders,
-and saved custom colors. The existing verification apps on both personal devices
-are reserved for manual testing: do not run connected tests that reinstall/remove
-them without first arranging to preserve any manual setup. Local JVM tests and
-`preparePublicRelease` do not touch installed apps.
+Linux/JDK 17+ example; pick a **new directory outside the repository**:
 
-- [ ] Complete the current [signed-device checklist](TESTING.md). Test the actual release build.
-- [ ] Exercise a real higher-version update signed with the same key. Do not uninstall between versions.
-- [ ] Confirm public/debug/verification packages and labels are independent.
-- [ ] Verify the independent signing-material backup. Compare its certificate fingerprint.
-- [ ] Review the files going public: no keys, passwords, private PDFs, campaigns or unlicensed screenshots.
-- [ ] Review resolved runtime dependencies: `./gradlew :app:dependencies --configuration releaseRuntimeClasspath`.
-- [ ] Prepare corresponding source and license notices, as described below.
-- [ ] Update README status, CHANGELOG release notes and any known limitations truthfully.
-- [ ] Commit the intended source changes, rebuild, and check `Uncommitted changes: false` in `release-info.txt`.
-- [ ] Confirm the tested code is the revision to be tagged. Any code change after testing needs revalidation.
-- [ ] Check [Android developer-verification requirements](https://developer.android.com/developer-verification)
-      for the intended distribution audience; Obtainium does not bypass platform installation rules.
+```sh
+./gradlew :app:createReleaseKey -PnaigreKeyDirectory="$HOME/.local/share/naigre/signing"
+```
+
+This creates a 3072-bit RSA PKCS12 key valid for 30 years, with alias `naigre`
+and public certificate subject `CN=NaIgre`. A cryptographically random password is
+saved in `release.properties`, not printed or passed as a command-line argument.
+The directory has mode `700`; the key and credentials have mode `600`.
+The task refuses an existing directory. Do not delete or replace a real key to rerun it.
+
+Select the configuration for release commands:
+
+```sh
+export NAIGRE_SIGNING_PROPERTIES="$HOME/.local/share/naigre/signing/release.properties"
+./gradlew :app:checkReleaseKey
+```
+
+For an existing key, create a private Java properties file outside the repository
+containing `storeFile` (absolute path), `storeType` (`PKCS12` or `JKS`),
+`storePassword`, `keyAlias` and `keyPassword`, then point the environment variable
+at it. Respect Java properties escaping; the key-generation task handles this automatically.
+
+**Back up both the keystore and its credentials to an independent, secure location**
+(for example encrypted offline storage). The generated credentials file contains
+the password, so possession of both files gives signing authority. Permissions on
+this laptop are not a backup. Check the backup can be read and record the signing
+certificate's SHA-256 fingerprint from `release-info.txt`. Never publish either
+private file, paste its contents into an issue, or include it in build logs/scans.
+If restored to another location, update `storeFile` in the private configuration.
+
+Future updates must use this key. Losing it is not something Obtainium can repair.
+See [Android app signing](https://developer.android.com/studio/publish/app-signing).
 
 ### Source and license handoff
 

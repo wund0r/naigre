@@ -26,12 +26,16 @@ import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import io.noties.markwon.ext.tables.TableRowSpan
+import io.noties.markwon.ext.tables.TableTheme
 import wund0r.naigre.reader.markdown.MarkdownContent
 import wund0r.naigre.reader.markdown.MarkdownDocument
 import wund0r.naigre.reader.markdown.MarkdownEngine
 import wund0r.naigre.reader.markdown.MarkdownFoldMode
 import wund0r.naigre.reader.markdown.MarkdownFoldState
 import wund0r.naigre.reader.markdown.MarkdownVisibility
+import wund0r.naigre.reader.markdown.WikiLinkSpan
+import wund0r.naigre.reader.markdown.WikiLinkSpec
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -57,6 +61,8 @@ class MarkdownSurface @JvmOverloads constructor(
     }
 
     private val density = resources.displayMetrics.density
+    private val foldMarkerSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 24f, resources.displayMetrics)
+    private val foldMarkerMargin = foldMarkerSize.roundToInt() + dp(8)
     private val scrollView = ScrollView(context).apply {
         isFillViewport = true
         isVerticalScrollBarEnabled = true
@@ -78,8 +84,9 @@ class MarkdownSurface @JvmOverloads constructor(
     private var layoutGeneration = 0
     private var viewportRestoreListener: ViewTreeObserver.OnPreDrawListener? = null
     private var pendingViewport: ViewportState? = null
-    private var contentInsets = intArrayOf(dp(20), dp(20), dp(20), dp(32))
+    private var contentInsets = intArrayOf(dp(20), dp(20), dp(20), 0, dp(32))
     var onBlankTap: (() -> Unit)? = null
+    var onWikiLink: ((WikiLinkSpec, Boolean) -> Unit)? = null
 
     init {
         scrollView.addView(
@@ -96,14 +103,16 @@ class MarkdownSurface @JvmOverloads constructor(
         }
     }
 
-    fun setUiColors(background: Int, text: Int) {
+    fun setUiColors(background: Int, text: Int, link: Int = text) {
         setBackgroundColor(background)
         scrollView.setBackgroundColor(background)
         textView.setTextColor(text)
+        textView.setLinkTextColor(link)
     }
 
-    fun setContentInsets(left: Int, top: Int, right: Int, bottom: Int) {
-        val insets = intArrayOf(left, top, right, bottom)
+    /** Viewport insets are separate from end padding, which scrolls with the document. */
+    fun setContentInsets(left: Int, top: Int, right: Int, bottom: Int, endPadding: Int = 0) {
+        val insets = intArrayOf(left, top, right, bottom, endPadding)
         if (contentInsets.contentEquals(insets)) return
         val viewport = captureViewportState()
         contentInsets = insets
@@ -271,6 +280,7 @@ class MarkdownSurface @JvmOverloads constructor(
     }
 
     fun clear() {
+        textView.cancelWikiGesture()
         ++layoutGeneration
         cancelViewportRestore()
         content = null
@@ -287,7 +297,7 @@ class MarkdownSurface @JvmOverloads constructor(
     private inner class HeadingFoldSpan(val sectionIndex: Int, val mode: MarkdownFoldMode) : ClickableSpan(), LeadingMarginSpan {
         override fun onClick(widget: View) { toggleHeading(sectionIndex) }
         override fun updateDrawState(ds: TextPaint) { /* Keep the normal heading style. */ }
-        override fun getLeadingMargin(first: Boolean): Int = dp(24)
+        override fun getLeadingMargin(first: Boolean): Int = foldMarkerMargin
         override fun drawLeadingMargin(
             canvas: Canvas, paint: Paint, x: Int, dir: Int, top: Int, baseline: Int, bottom: Int,
             text: CharSequence, start: Int, end: Int, first: Boolean, layout: Layout,
@@ -295,26 +305,122 @@ class MarkdownSurface @JvmOverloads constructor(
             if (!first) return
             val savedSize = paint.textSize
             val savedStyle = paint.style
-            paint.textSize = 16f * density
+            paint.textSize = foldMarkerSize
             paint.style = Paint.Style.FILL
             val marker = when (mode) {
                 MarkdownFoldMode.COLLAPSED -> "▸"
                 MarkdownFoldMode.HEADINGS_ONLY -> "▿"
                 MarkdownFoldMode.EXPANDED -> "▾"
             }
-            canvas.drawText(marker, (x + if (dir < 0) -dp(20) else 0).toFloat(), baseline.toFloat(), paint)
+            canvas.drawText(marker, x + if (dir < 0) -foldMarkerSize else 0f, baseline.toFloat(), paint)
             paint.textSize = savedSize
             paint.style = savedStyle
         }
     }
 
     /** A heading tap folds; scrolling, long-press selection, and inline links retain their gestures. */
-    private inner class FoldingTextView(context: Context) : TextView(context) {
+    private inner class FoldingTextView(context: Context) : TextView(context), WikiLinkSpan.Host {
         private var downHeading: HeadingFoldSpan? = null
         private var clickedHeading: HeadingFoldSpan? = null
         private var downX = 0f
         private var downY = 0f
         private val slop = ViewConfiguration.get(context).scaledTouchSlop
+        private var selectionScrollGeneration = -1
+        private var restoringViewport = false
+        private var downLink: WikiLinkSpan? = null
+        private var linkGesture = false
+        private var linkHeld = false
+        private val tableCellPadding = TableTheme.create(context).tableCellPadding()
+        private val linkLongPress = Runnable { if (downLink != null && linkGesture) performLongClick() }
+
+        override fun openWikiLink(spec: WikiLinkSpec) { onWikiLink?.invoke(spec, false) }
+
+        private fun linkAt(event: MotionEvent): WikiLinkSpan? {
+            val spanned = text as? Spanned ?: return null
+            val textLayout = layout ?: return null
+            val y = event.y.toInt() - totalPaddingTop + scrollY
+            if (y < 0 || y >= textLayout.height) return null
+            val line = textLayout.getLineForVertical(y)
+            val x = event.x - totalPaddingLeft + scrollX
+            val row = spanned.getSpans(textLayout.getLineStart(line), textLayout.getLineEnd(line), TableRowSpan::class.java)
+                .firstOrNull()
+            if (row != null) {
+                val rowX = x - textLayout.getPrimaryHorizontal(spanned.getSpanStart(row))
+                if (rowX < 0) return null
+                // Table cells have their own layouts, created lazily on the first draw.
+                val cellLayout = runCatching { row.findLayoutForHorizontalOffset(rowX.toInt()) }.getOrNull() ?: return null
+                val cellWidth = row.cellWidth().takeIf { it > 0 } ?: return null
+                val cellText = cellLayout.text as? Spanned ?: return null
+                var maxHeight = cellLayout.height
+                for (columnX in 0 until textLayout.width step cellWidth) {
+                    val columnLayout = row.findLayoutForHorizontalOffset(columnX) ?: break
+                    maxHeight = maxOf(maxHeight, columnLayout.height)
+                }
+                val rowTop = textLayout.getLineTop(line)
+                val heightDiff = (textLayout.getLineBottom(line) - rowTop - maxHeight) / 4
+                return linkInLayout(cellText, cellLayout, rowX % cellWidth - tableCellPadding,
+                    y - rowTop - tableCellPadding - heightDiff)
+            }
+            return linkInLayout(spanned, textLayout, x, y)
+        }
+
+        private fun linkInLayout(spanned: Spanned, textLayout: Layout, x: Float, y: Int): WikiLinkSpan? {
+            if (y < 0 || y >= textLayout.height) return null
+            val line = textLayout.getLineForVertical(y)
+            if (x < textLayout.getLineLeft(line) || x > textLayout.getLineRight(line)) return null
+            val offset = textLayout.getOffsetForHorizontal(line, x)
+            return spanned.getSpans(offset, offset, WikiLinkSpan::class.java).firstOrNull {
+                val start = maxOf(spanned.getSpanStart(it), textLayout.getLineStart(line))
+                val end = minOf(spanned.getSpanEnd(it), textLayout.getLineEnd(line))
+                val rtl = textLayout.getParagraphDirection(line) < 0
+                val firstX = if (spanned.getSpanStart(it) < start) {
+                    if (rtl) textLayout.getLineRight(line) else textLayout.getLineLeft(line)
+                } else textLayout.getPrimaryHorizontal(start)
+                val lastX = if (end == textLayout.getLineEnd(line) && line < textLayout.lineCount - 1) {
+                    if (rtl) textLayout.getLineLeft(line) else textLayout.getLineRight(line)
+                } else textLayout.getPrimaryHorizontal(end)
+                start < end && x >= minOf(firstX, lastX) && x <= maxOf(firstX, lastX)
+            }
+        }
+
+        fun cancelWikiGesture() {
+            removeCallbacks(linkLongPress)
+            downLink = null
+            linkGesture = false
+            linkHeld = false
+        }
+
+        override fun onDetachedFromWindow() {
+            cancelWikiGesture()
+            super.onDetachedFromWindow()
+        }
+
+        override fun performLongClick(): Boolean {
+            val link = downLink ?: return super.performLongClick()
+            if (!linkHeld) {
+                linkHeld = true
+                removeCallbacks(linkLongPress)
+                onWikiLink?.invoke(link.spec, true)
+            }
+            return true
+        }
+
+        override fun onPreDraw(): Boolean {
+            // TextView can register its cursor reveal after our restore listener during
+            // measurement. Suppress it for this rebuild even if our listener ran first.
+            restoringViewport = selectionScrollGeneration != layoutGeneration
+            selectionScrollGeneration = layoutGeneration
+            return try {
+                super.onPreDraw()
+            } finally {
+                restoringViewport = false
+            }
+        }
+
+        override fun bringPointIntoView(offset: Int): Boolean {
+            if (pendingViewport != null || restoringViewport) return false
+            return super.bringPointIntoView(offset)
+        }
 
         private fun headingAt(event: MotionEvent): HeadingFoldSpan? {
             val spanned = text as? Spanned ?: return null
@@ -333,13 +439,44 @@ class MarkdownSurface @JvmOverloads constructor(
         override fun onTouchEvent(event: MotionEvent): Boolean {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    cancelWikiGesture()
+                    downLink = linkAt(event)
+                    linkGesture = downLink != null
                     downHeading = headingAt(event)
                     downX = event.x
                     downY = event.y
+                    if (linkGesture) {
+                        downHeading = null
+                        postDelayed(linkLongPress, ViewConfiguration.getLongPressTimeout().toLong())
+                        return true
+                    }
                 }
-                MotionEvent.ACTION_MOVE -> if (abs(event.x - downX) > slop || abs(event.y - downY) > slop) downHeading = null
-                MotionEvent.ACTION_CANCEL -> downHeading = null
+                MotionEvent.ACTION_MOVE -> {
+                    if (abs(event.x - downX) > slop || abs(event.y - downY) > slop) {
+                        downHeading = null
+                        downLink = null
+                        removeCallbacks(linkLongPress)
+                    }
+                    if (linkGesture) return true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    downHeading = null
+                    if (linkGesture) {
+                        cancelWikiGesture()
+                        return true
+                    }
+                }
                 MotionEvent.ACTION_UP -> {
+                    if (linkGesture) {
+                        removeCallbacks(linkLongPress)
+                        val link = downLink
+                        if (link != null && link === linkAt(event) && !linkHeld) {
+                            if (event.eventTime - event.downTime >= ViewConfiguration.getLongPressTimeout()) performLongClick()
+                            else link.onClick(this)
+                        }
+                        cancelWikiGesture()
+                        return true
+                    }
                     val heading = downHeading
                     downHeading = null
                     if (heading != null && heading === headingAt(event) &&
@@ -367,7 +504,7 @@ class MarkdownSurface @JvmOverloads constructor(
 
     private fun applyInsets() {
         scrollView.setPadding(contentInsets[0], contentInsets[1], contentInsets[2], contentInsets[3])
-        textView.setPadding(0, 0, 0, 0)
+        textView.setPadding(0, 0, 0, contentInsets[4])
     }
 
     private fun dp(value: Int): Int = (value * density).toInt()

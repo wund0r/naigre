@@ -107,6 +107,18 @@ Markdown supports headings, tables and session-only folding. Heading/search jump
 reveal folded destinations. If you reveal a child's body in headings-only mode,
 the next parent tap collapses the subtree.
 
+Markdown wiki links open files already known to NaIgre: `[[downtime.pdf#page=12|Pazuzu]]`
+shows **Pazuzu** and opens physical PDF page 12; `[[maps/level 3.jpg]]` shows
+**level 3.jpg** and opens that image in its album. PDF/Markdown links without a
+page number open the document's start. Tap to open or reuse a destination tab;
+hold to open the reference pane. Existing destination tabs keep their reading
+position. Table items are matched first; library-only matches prompt before
+adding the book or whole image album to the table. Duplicate matches get a chooser.
+Paths match campaign-relative paths recorded during folder scans. Rescan an older
+folder import to record PDF/Markdown paths; bare filenames and existing image
+album paths also work. In Markdown table cells, escape the alias separator:
+`[[downtime.pdf#page=12\|Pazuzu]]`.
+
 ## Files, privacy and recovery
 
 - Files remain at their original Android document-provider locations; NaIgre

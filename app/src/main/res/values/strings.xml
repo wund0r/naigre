@@ -461,4 +461,14 @@
     <string name="save_library_failed">Save library failed</string>
     <string name="save_item_index_failed">Save item index failed</string>
     <string name="delete_item_index_failed">Delete item index failed</string>
+  <string name="wiki_link_invalid">Invalid file link: %1$s. Use a filename, or a PDF filename followed by #page=12.</string>
+  <string name="wiki_link_missing">%1$s was not found on the table or in the library.</string>
+  <string name="wiki_link_changed">The link target changed. Tap the link again.</string>
+  <string name="wiki_link_index_unavailable">Could not load the album metadata needed to resolve %1$s.</string>
+  <string name="wiki_link_loading">Finding linked image…</string>
+  <string name="wiki_link_choose_target">Choose a link target</string>
+  <string name="wiki_link_add_book_message">“%1$s” is in your library but not on the table. Add it and open the link?</string>
+  <string name="wiki_link_add_album_message">“%1$s” belongs to album “%2$s”, which is not on the table. Add the album and open the image?</string>
+  <string name="wiki_link_add_book">Add book and open</string>
+  <string name="wiki_link_add_album">Add album and open</string>
 </resources>

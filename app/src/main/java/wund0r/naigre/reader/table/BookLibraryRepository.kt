@@ -176,6 +176,8 @@ class BookLibraryRepository internal constructor(
                     sourceLastModified = item.optNullableLong("sourceModified"),
                     sourceFingerprint = item.optNullableString("sourceFingerprint"),
                     sourceRevisionToken = item.optNullableString("sourceRevision"),
+                    sourceRelativePath = item.optNullableString("sourceRelativePath"),
+                    markdownContentVersion = item.optInt("markdownContentVersion", 0),
                     tagIds = item.optJSONArray("tagIds").toStringSet().filterTo(linkedSetOf()) {
                         it in knownTagIds
                     },
@@ -273,6 +275,8 @@ class BookLibraryRepository internal constructor(
                                 .put("sourceModified", book.sourceLastModified ?: JSONObject.NULL)
                                 .put("sourceFingerprint", book.sourceFingerprint ?: JSONObject.NULL)
                                 .put("sourceRevision", book.sourceRevisionToken ?: JSONObject.NULL)
+                                .put("sourceRelativePath", book.sourceRelativePath ?: JSONObject.NULL)
+                                .put("markdownContentVersion", book.markdownContentVersion)
                                 .put("tagIds", JSONArray(book.tagIds.toList())),
                         )
                     }

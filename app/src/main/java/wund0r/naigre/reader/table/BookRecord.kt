@@ -3,6 +3,7 @@
 package wund0r.naigre.reader.table
 
 import wund0r.naigre.reader.navigation.BookmarkEntry
+import wund0r.naigre.reader.markdown.MARKDOWN_CONTENT_VERSION
 import java.security.MessageDigest
 
 const val CURRENT_BOOK_INDEX_VERSION = 6
@@ -55,6 +56,8 @@ data class BookRecord(
     val sourceFingerprint: String? = null,
     val sourceRevisionToken: String? = null,
     val tagIds: Set<String> = emptySet(),
+    val sourceRelativePath: String? = null,
+    val markdownContentVersion: Int = MARKDOWN_CONTENT_VERSION,
 ) {
     val bookmarkCount: Int
         get() = if (indexLoaded) {
@@ -106,6 +109,8 @@ fun BookRecord.sourceRevisionKey(): String {
             add(sourceFingerprint)
         }
         LibraryItemKind.MARKDOWN -> {
+            add(MARKDOWN_CONTENT_VERSION)
+            add(markdownContentVersion)
             add(sourceSize)
             add(sourceLastModified)
             add(sourceFingerprint)

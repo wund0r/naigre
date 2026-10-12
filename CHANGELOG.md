@@ -1,6 +1,12 @@
 # NaIgre changelog
 
-## Unreleased
+## 26.10.1: ссыл очки
+- Вики-ссылки в Markdown открывают страницы PDF, заметки и изображения: нажми для новой или существующей вкладки, удерживай для выноски. Файлы на столе имеют приоритет; для материалов из библиотеки предлагается добавить книгу или альбом на стол.
+- Исправлено обрезание Markdown заметок над панелью вкладок.
+- Markdown wiki links open PDF pages, notes and album images. Tap opens/reuses a destination tab; hold opens the reference pane. Table matches take priority, with confirmation before adding library-only books/albums. Folder scans retain relative paths; Markdown indexes refresh for the new visible link labels.
+- Fixed Markdown clipping above the tabs.
+
+## v26.10.0: quickstart docs and more speeeeeeed
 
 - Добавлен "быстрый старт", который объясняет фишки приложения. Он будет доступен на странице библиотеки (если она пуста) и через меню.
 - Нажатие на пустое место документа теперь почти мгновенно показывает или скрывает панель вкладок и другой интерфейс. Скоооооорость.
@@ -10,7 +16,7 @@
 - PDF/image taps now respond on release without waiting for double-tap confirmation. Reader controls show/hide immediately; double-tap zoom reset is removed, with Reset zoom still available in the menu.
 - The navigation-result reference action now uses ◨ in Wide layout and ⬒ in Tall layout to indicate the destination pane.
 
-## v26.09.1 — UI and languages (release candidate, not yet published)
+## v26.09.1: UI and languages
 
 - Books support custom opaque colors alongside the existing eight presets. The color picker provides hue/saturation/brightness sliders, optional exact `#RRGGBB` input, and live swatch/selected-tab previews. Apply saves the color across library, tabs and search without rebuilding previews or text indexes; Cancel discards the draft. English and Russian labels are included.
 - Library cards now use a uniform compact layout: fixed portrait preview on the left, filename/tags/metadata and controls on the right. PDFs show their first page, albums their first image, and Markdown notes up to four stored headings. Previews preserve image proportions, load lazily on a dedicated background worker, and use bounded memory/disk caches; source refreshes invalidate them and forgetting an item clears its previews. Card views are recycled, and missing previews/errors never change card size.
@@ -23,7 +29,7 @@
 - Fixed translated/large-text layouts: the Library header uses two rows when needed; search modes, All filters and reference Edit retain padding and can grow to fit. Search result counts remain in the status row rather than crowding the query header.
 - Added tab-state round-trip, translation coverage, English/Russian resource-format and Cyrillic navigation/full-text search checks. Verified layouts and Activity recreation on Android 12/16, native per-app language switching on Android 16, and Cyrillic PDF rendering/extraction. Real-campaign wording review remains part of release acceptance.
 
-## v26.09.0 — first public beta (2026-09-23)
+## v26.09.0: first public beta (2026-09-23)
 
 - Restored 12 dp left/right padding for book selectors in the search overlay and search reference pane.
 - First public-release preparation using `YY.MM.PATCH` calendar versions. Earlier prototype entries below retain their original version numbers.

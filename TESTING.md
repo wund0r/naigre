@@ -1,5 +1,44 @@
 # Testing NaIgre
 
+## Markdown viewport — 2026-10-12 (unreleased)
+
+- Markdown uses the insets delivered to the content view, excluding system bars
+  already fitted by Android. Reader controls overlay both panes; toggling them
+  keeps document margins, viewport bounds and scroll range fixed. Trailing
+  document padding lets the final line scroll above the tabs and Search button.
+- Added three viewport regression checks: bottom-heading pixels and system-bar
+  clearance with fitted and overlapping bars, unchanged text coordinates at
+  the start/middle/end of both panes in Wide/Tall layouts, and a real blank tap
+  retaining text position with the final line clearing visible controls. The
+  coordinate check reproduced the previous 100 px jump despite unchanged scrollY.
+- Verification: 52 JVM tests and 15 focused tablet checks passed on Samsung
+  SM-T860 / Android 12, including existing folding and wiki-link gestures. Debug
+  build and lint passed (0 errors, 13 existing warnings).
+
+## Markdown wiki links — 2026-10-12 (unreleased)
+
+- Wiki links display aliases or basenames and open PDF pages, Markdown starts,
+  and album images. Tap opens/reuses a primary destination tab at its current
+  reading position; hold opens/replaces the reference pane without firing a tap.
+- Resolution uses catalogue metadata only. Table matches take priority;
+  library-only targets require confirmation before adding the book or entire
+  image album. Duplicate matches show a chooser with paths, colors and tags.
+- Folder scans retain relative paths in backward-compatible catalogue fields.
+  Older PDF/Markdown imports need a regular folder rescan for qualified paths;
+  bare filenames and existing image album paths remain usable.
+- Markdown content versions invalidate heading/full-text caches, including
+  inactive notes already on the table, without reindexing PDFs. Image links use
+  URI identities so album reordering retains the same destination.
+- Verification: 52 JVM tests passed; debug build and lint passed. 23 focused
+  instrumentation checks passed on Samsung SM-T860 / Android 12, covering
+  parsing/rendering, folded, wrapped and table-cell links, gestures, page/tab/image navigation,
+  ambiguity, add/cancel prompts, stale prompts, catalogue compatibility, and
+  legacy Markdown index upgrades. Tests used synthetic fixture files and the
+  disposable verification package; its library was checked before installation.
+- Manual checks: real campaign paths and duplicate names, English/Russian
+  dialogs with enlarged text, and both Wide/Tall reference layouts. In Markdown
+  table cells, write the alias separator as `\|`.
+
 ## Immediate reader taps — 2026-10-01 (unreleased)
 
 - PDF/image tap actions run on release, without double-tap confirmation. Rapid

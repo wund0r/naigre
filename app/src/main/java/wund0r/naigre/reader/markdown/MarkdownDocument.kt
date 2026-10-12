@@ -7,6 +7,8 @@ import android.net.Uri
 import android.text.Spanned
 import android.widget.TextView
 import io.noties.markwon.Markwon
+import io.noties.markwon.AbstractMarkwonPlugin
+import io.noties.markwon.MarkwonVisitor
 import io.noties.markwon.core.spans.HeadingSpan
 import io.noties.markwon.ext.tables.TablePlugin
 import org.commonmark.node.Code
@@ -17,6 +19,7 @@ import org.commonmark.node.IndentedCodeBlock
 import org.commonmark.node.Node
 import org.commonmark.node.SoftLineBreak
 import org.commonmark.node.Text
+import org.commonmark.parser.Parser
 import wund0r.naigre.reader.pdf.PdfAnnotationInfo
 import wund0r.naigre.reader.pdf.DocumentReadException
 import wund0r.naigre.reader.pdf.DocumentReadProblem
@@ -40,6 +43,19 @@ data class MarkdownContent(
 class MarkdownEngine(context: android.content.Context) {
     private val markwon = Markwon.builder(context.applicationContext)
         .usePlugin(TablePlugin.create(context.applicationContext))
+        .usePlugin(object : AbstractMarkwonPlugin() {
+            override fun configureParser(builder: Parser.Builder) {
+                builder.inlineParserFactory(wikiLinkInlineParser())
+            }
+
+            override fun configureVisitor(builder: MarkwonVisitor.Builder) {
+                builder.on(WikiLinkNode::class.java) { visitor, node ->
+                    val start = visitor.length()
+                    visitor.visitChildren(node)
+                    visitor.setSpans(start, WikiLinkSpan(node.spec))
+                }
+            }
+        })
         .build()
 
     @Synchronized
@@ -98,7 +114,7 @@ class MarkdownEngine(context: android.content.Context) {
         // and ends at the next peer/ancestor instead; do not change search page identities.
         val sections = markdownSubtreeBounds(provisional, plainText.length)
         val searchTextBySection = extractSearchText(root, sections)
-        return MarkdownContent(rendered, plainText, sections, searchTextBySection, sha256(source))
+        return MarkdownContent(rendered, plainText, sections, searchTextBySection, sha256("$MARKDOWN_CONTENT_VERSION\n$source"))
     }
 
     fun apply(textView: TextView, rendered: Spanned) {

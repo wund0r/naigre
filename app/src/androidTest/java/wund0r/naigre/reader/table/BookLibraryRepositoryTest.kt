@@ -8,6 +8,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
+import org.json.JSONObject
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -91,6 +93,21 @@ class BookLibraryRepositoryTest {
         assertTrue(summaries.none { it.indexLoaded })
         assertTrue(repository.readIndex(summaries.first { it.id == first.id }) is BookIndexLoadResult.Failed)
         assertTrue(repository.readIndex(summaries.first { it.id == second.id }) is BookIndexLoadResult.Loaded)
+    }
+
+    @Test
+    fun relativePathsRoundTripAndOlderCatalogsRemainReadable() {
+        val book = book("path").copy(kind = LibraryItemKind.MARKDOWN, sourceRelativePath = "notes/campaign.md")
+        repository.saveCatalog(BookLibraryState(listOf(book), linkedSetOf(book.id), emptyList(), emptyList()))
+        val restored = (repository.readCatalog() as BookCatalogState.Loaded).library.books.single()
+        assertEquals(book.sourceRelativePath, restored.sourceRelativePath)
+        assertEquals(book.markdownContentVersion, restored.markdownContentVersion)
+        val legacy = JSONObject(catalog.readText())
+        legacy.getJSONArray("books").getJSONObject(0).remove("sourceRelativePath")
+        legacy.getJSONArray("books").getJSONObject(0).remove("markdownContentVersion")
+        catalog.writeText(legacy.toString())
+        assertNull((repository.readCatalog() as BookCatalogState.Loaded).library.books.single().sourceRelativePath)
+        assertEquals(0, (repository.readCatalog() as BookCatalogState.Loaded).library.books.single().markdownContentVersion)
     }
 
     private fun book(id: String) = BookRecord(
