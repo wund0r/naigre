@@ -1,5 +1,105 @@
 # Testing NaIgre
 
+## Search history row styling — 2026-10-14 (unreleased)
+
+- Recent searches use 40% and recently closed tabs use 60% of the column space
+  after the divider and its spacing, at every width and font scale. Rows stay
+  aligned and More history/Less history remains centered across the full overlay.
+- The Destinations/matches/items summary separates history from the main results.
+  A centered More history/Less history button below the split expands both columns
+  from 3 to at most 10 entries each and collapses them again. It is hidden when
+  neither group has more than 3 entries; expansion survives history refreshes.
+  Navigation results and histories share SearchResultRow typography, palette stripes, color
+  dots and action-button ripple styling. History rows reserve one title line and
+  one detail line with ellipsis, giving both columns the same compact height
+  calculated from the current font metrics. Column headings also share a height.
+- New-tab/reference buttons are direct horizontal row children, centered at the
+  right with 48 dp targets. Narrow history rows reduce decorative side spacing;
+  the two-column layout stays fixed and full labels remain in accessibility text.
+  History stripes alternate surface/surfaceRaised with the normal result divider.
+- Split verification: 7 focused tablet checks passed on Samsung SM-T860 / Android
+  12, covering the 40/60 proportions at 320/700 dp, English/Russian and font
+  scales 1/2, aligned rows, centered buttons, shared expansion and background
+  restores. Native phone/tablet previews were reviewed. Debug build and lint
+  passed (0 errors, 13 existing warnings).
+- Earlier history/row verification: 58 JVM tests and 29 focused tablet checks passed on Samsung
+  SM-T860 / Android 12. Checks cover equal heights/row starts, centered inline
+  controls, label bounds, striping/shared typography and summary order, including
+  320/700 dp widths, English/Russian and font scales 1/2. Shared expansion checks
+  cover the 10-entry cap, collapse to 3, button visibility, one empty column and
+  keeping both columns expanded after a background restore. Existing search/history
+  open/new/background/reference gestures and state restoration passed. Debug
+  build and lint passed (0 errors, 13 existing warnings); native phone/tablet
+  previews are in the additional test output, including search-history-overlay-more.png
+  with the shared button and counts below. Installed reader packages were untouched.
+
+## Search overlay histories — 2026-10-14 (unreleased)
+
+- Empty search shows Recent searches on the left and Recently closed on the
+  right at every width, locale and font scale. Three entries per column are
+  shown initially; More history expands both to at most 10, and Less history
+  returns to 3. The heading menus clear each
+  history. Both columns and normal results share the same ListView scroll area;
+  input/mode/scope controls remain above it and the body can shrink for the keyboard.
+- Used queries retain Navigate/Full text mode and scope; unused typing is not
+  recorded. Closed tabs retain their title, origin and current reading location.
+  Tap restores into the current tab; + restores a new session, hold + restores
+  in the background, and the reference action restores alongside. In-session
+  folds/scroll and image/PDF viewports follow the restored session.
+- Both histories persist, newest first, up to 30 entries each. Reopened tabs are
+  removed from closed history. Off-table materials are hidden until added back;
+  forgetting a material clears its closed tabs and scoped queries. Pane moves
+  do not count as closes; Close others records each removed tab, active first.
+- Verification: 58 JVM tests and 43 focused tablet checks passed on Samsung
+  SM-T860 / Android 12, including history persistence/cleanup, current/new/
+  background/reference restores, folds/scroll/zoom, search scope/mode, a native
+  320 dp dialog and English/Russian columns at 320/700 dp with font scales 1/2.
+  Debug build and lint passed (0 errors, 13 existing warnings). Native previews
+  are saved as search-history-overlay-phone.png, search-history-overlay.png and
+  search-history-phone.png/tablet.png in additional test output. The normal
+  reader/debug packages were untouched; tests used the disposable verification app.
+
+## Tab/reference moves — 2026-10-14 (unreleased)
+
+- Tab long-press menus offer **Move to reference pane**. A document reference
+  swaps into the selected tab's position; background swaps keep the active tab.
+  Reference long-press menus offer **Make a regular tab**, which appends and
+  activates that session. The last regular tab needs a document reference to swap.
+  Search results cannot become a regular tab; moving a tab replaces those results.
+- Reading sessions retain titles, link identities, original destinations,
+  Markdown folds/scroll and separate image/PDF viewports across pane changes.
+  PDF viewport transfer follows the selected page, including the right page of
+  a spread. Document-reference metadata is saved in preferences and instance
+  state; close, promotion and removal from the table clear the saved reference.
+- Added six JVM navigation checks and fourteen tablet checks for menus, active
+  and background swaps, last-tab guards, duplicate sessions, Wide/Tall image
+  zoom, Markdown folds/scroll, recreation/cold launch, reference cleanup,
+  exact destination persistence and spread viewport transfer.
+- Verification: 58 JVM tests and 31 focused tablet checks passed on Samsung
+  SM-T860 / Android 12. Debug build and lint passed (0 errors, 13 existing
+  warnings). Tests use the disposable verification package; the installed
+  reader and debug app are untouched.
+
+## Markdown heading touch targets — 2026-10-14 (unreleased)
+
+- Fold arrows have a gutter at least 48 dp wide with the existing glyph size.
+  The shared left gutter is reserved for every paragraph; arrows are decorations
+  outside the text layout. Foldable/plain headings and paragraph text align,
+  wrapped heading lines share the same column, and list/quote indentation remains.
+  Heading targets expand vertically into nearby blank spacing, stopping before
+  neighbouring content, tables and rules. The gutter takes priority over links;
+  other link hits use their actual bounds, including wrapped continuation lines.
+- Added eight interaction checks for entirely linked headings, gutter edges,
+  larger fonts, link tap/hold, blank spacing above/below headings, adjacent body
+  links, wrapped titles, RTL arrows, and drag/cancel gestures.
+- Added four alignment/rendering checks, including visible arrow pixels in the
+  gutter and an empty gutter beside headings that cannot fold. A rendering
+  preview is saved as `markdown-shared-gutter.png` in the additional test output.
+- Verification: 52 JVM tests and 27 focused tablet checks passed on Samsung
+  SM-T860 / Android 12, including existing folding, wiki-link and viewport tests.
+  Debug build and lint passed (0 errors, 13 existing warnings). The disposable
+  verification package was absent before testing; the installed reader was untouched.
+
 ## Markdown viewport — 2026-10-12 (unreleased)
 
 - Markdown uses the insets delivered to the content view, excluding system bars

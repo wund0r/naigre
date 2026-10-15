@@ -1,5 +1,14 @@
 # NaIgre changelog
 
+## 26.10.2: перемещение вкладок и история на пустом месте
+
+- В пустом поиске появились две постоянные колонки: недавние поиски слева и недавно закрытые вкладки справа, в том числе на телефонах. Поиск запоминает режим и область; закрытую вкладку можно восстановить на сохранённой позиции в текущей или новой вкладке, в фоне или в выноске. Истории сохраняются после перезапуска; их можно развернуть и очистить. Сводка результатов поиска отделяет историю от основных результатов. Общая кнопка «Больше истории» разворачивает обе колонки с 3 до 10 записей, а «Меньше истории» сворачивает их обратно. Обе колонки истории используют одинаковые компактные строки с чередующимся фоном, как в результатах поиска.
+- Empty search shows recent searches on the left and recently closed tabs on the right at every screen size. Searches retain mode/scope; closed tabs restore their saved reading location in the current/new/background tab or reference pane. Histories persist across restarts and can be expanded or cleared. Search counts separate history from the main results. A shared More history/Less history button expands both columns from 3 to at most 10 entries and collapses them again. Both history columns use equally sized compact rows with the same alternating colors and styling as search results.
+- Вкладку можно переместить в выноску через меню удержания; прежняя выноска становится вкладкой на её месте. Выноску можно сделать обычной вкладкой. Позиция чтения, свёрнутые заголовки и масштаб сохраняются при перемещении; выноска с документом восстанавливается после перезапуска.
+- Move a tab into the reference pane from its long-press menu, swapping an existing document reference into its tab position. A reference can become a regular tab. Moves preserve reading position, Markdown folds and zoom; document references survive app restarts.
+- Улучшил форматирование markdown заметок. Заголовки и обычные абзацы выровнены по общей колонке текста. Стрелки сворачивания расположены отдельно слева и больше не сдвигают только сворачиваемые заголовки.
+- Improved Markdown formatting. Headings and paragraphs share one text column. Fold arrows sit in a separate left gutter, so foldable and non-foldable headings align, including wrapped titles.
+
 ## 26.10.1: ссыл очки
 - Вики-ссылки в Markdown открывают страницы PDF, заметки и изображения: нажми для новой или существующей вкладки, удерживай для выноски. Файлы на столе имеют приоритет; для материалов из библиотеки предлагается добавить книгу или альбом на стол.
 - Исправлено обрезание Markdown заметок над панелью вкладок.

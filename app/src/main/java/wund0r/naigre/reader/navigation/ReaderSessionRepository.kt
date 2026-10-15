@@ -10,10 +10,11 @@ import org.json.JSONObject
 data class RestoredReaderTabs(
     val tabs: List<ReaderTab>,
     val activeTabIndex: Int,
+    val reference: ReaderTab? = null,
 )
 
 /**
- * Owns the durable representation of reader tabs and bookmark visit counts.
+ * Owns the durable representation of reader tabs, document references and bookmark visit counts.
  *
  * Navigation and rendering decisions remain in the activity. Keeping the storage format here
  * prevents lifecycle restoration, normal persistence, and book removal from each implementing
@@ -25,6 +26,7 @@ class ReaderSessionRepository(context: Context) {
         private const val BOOKMARK_VISIT_PREFS = "bookmark-visits-v2"
         private const val PREF_TABS_JSON = "table-tabs-json"
         private const val PREF_ACTIVE_TAB = "table-active-tab"
+        private const val PREF_REFERENCE_JSON = "table-reference-json"
         private const val STATE_TAB_PAGES = "tab-pages"
         private const val STATE_TAB_BOOKS = "tab-books"
         private const val STATE_TAB_LABELS = "tab-labels"
@@ -33,6 +35,9 @@ class ReaderSessionRepository(context: Context) {
         private const val STATE_TAB_ANCHORS = "tab-anchors"
         private const val STATE_TAB_ORIGINS = "tab-origins"
         private const val STATE_ACTIVE_TAB = "active-tab"
+        private const val STATE_REFERENCE_JSON = "reference-json"
+        private const val STATE_TAB_ORIGIN_Y = "tab-origin-y"
+        private const val STATE_TAB_PENDING_Y = "tab-pending-y"
     }
 
     private val sessionPrefs = context.getSharedPreferences(SESSION_PREFS, Context.MODE_PRIVATE)
@@ -46,24 +51,16 @@ class ReaderSessionRepository(context: Context) {
         return restorePersistedTabs(availablePageCounts)
     }
 
-    fun saveTabs(tabs: List<ReaderTab>, activeTabIndex: Int) {
+    fun saveTabs(tabs: List<ReaderTab>, activeTabIndex: Int, reference: ReaderTab? = null) {
         val array = JSONArray().apply {
             tabs.forEach { tab ->
-                put(
-                    JSONObject()
-                        .put("book", tab.bookId)
-                        .put("page", tab.pageIndex)
-                        .put("label", tab.label)
-                        .put("labelKind", tab.labelKind.name)
-                        .put("labelPage", tab.labelPageIndex)
-                        .put("anchor", tab.anchorKey ?: "")
-                        .put("originPage", tab.originPageIndex),
-                )
+                put(tabJson(tab))
             }
         }
         sessionPrefs.edit()
             .putString(PREF_TABS_JSON, array.toString())
             .putInt(PREF_ACTIVE_TAB, activeTabIndex)
+            .putString(PREF_REFERENCE_JSON, reference?.let { tabJson(it).toString() })
             .apply()
     }
 
@@ -71,6 +68,7 @@ class ReaderSessionRepository(context: Context) {
         outState: Bundle,
         tabs: List<ReaderTab>,
         activeTabIndex: Int,
+        reference: ReaderTab? = null,
     ) {
         outState.putIntegerArrayList(STATE_TAB_PAGES, ArrayList(tabs.map { it.pageIndex }))
         outState.putStringArrayList(STATE_TAB_BOOKS, ArrayList(tabs.map { it.bookId }))
@@ -80,6 +78,9 @@ class ReaderSessionRepository(context: Context) {
         outState.putStringArrayList(STATE_TAB_ANCHORS, ArrayList(tabs.map { it.anchorKey.orEmpty() }))
         outState.putIntegerArrayList(STATE_TAB_ORIGINS, ArrayList(tabs.map { it.originPageIndex }))
         outState.putInt(STATE_ACTIVE_TAB, activeTabIndex)
+        outState.putFloatArray(STATE_TAB_ORIGIN_Y, tabs.map { it.originDestinationY ?: Float.NaN }.toFloatArray())
+        outState.putFloatArray(STATE_TAB_PENDING_Y, tabs.map { it.pendingDestinationY ?: Float.NaN }.toFloatArray())
+        outState.putString(STATE_REFERENCE_JSON, reference?.let { tabJson(it).toString() })
     }
 
     fun loadBookmarkVisits(): Map<String, Int> = buildMap {
@@ -114,6 +115,8 @@ class ReaderSessionRepository(context: Context) {
         val labelPages = state?.getIntegerArrayList(STATE_TAB_LABEL_PAGES)
         val anchors = state?.getStringArrayList(STATE_TAB_ANCHORS)
         val origins = state?.getIntegerArrayList(STATE_TAB_ORIGINS)
+        val originY = state?.getFloatArray(STATE_TAB_ORIGIN_Y)
+        val pendingY = state?.getFloatArray(STATE_TAB_PENDING_Y)
         if (
             pages == null || bookIds == null || labels == null || pages.isEmpty() ||
             pages.size != labels.size || pages.size != bookIds.size
@@ -132,12 +135,15 @@ class ReaderSessionRepository(context: Context) {
                 anchorKey = anchors?.getOrNull(index)?.takeIf { it.isNotBlank() },
                 originPageIndex = (origins?.getOrNull(index) ?: pages[index])
                     .coerceIn(0, pageCount - 1),
+                originDestinationY = originY?.getOrNull(index)?.takeIf { it.isFinite() && (origins?.getOrNull(index) ?: pages[index]) in 0 until pageCount },
+                pendingDestinationY = pendingY?.getOrNull(index)?.takeIf { it.isFinite() && pages[index] in 0 until pageCount },
             )
         }
         if (restored.isEmpty()) return null
         return RestoredReaderTabs(
             tabs = restored,
             activeTabIndex = state.getInt(STATE_ACTIVE_TAB, 0).coerceIn(restored.indices),
+            reference = restoreReference(state.getString(STATE_REFERENCE_JSON), availablePageCounts),
         )
     }
 
@@ -151,19 +157,7 @@ class ReaderSessionRepository(context: Context) {
                 val array = JSONArray(json)
                 for (index in 0 until array.length()) {
                     val item = array.getJSONObject(index)
-                    val bookId = item.getString("book")
-                    val pageCount = availablePageCounts[bookId]?.takeIf { it > 0 } ?: continue
-                    val pageIndex = item.getInt("page")
-                    restored += ReaderTab(
-                        bookId = bookId,
-                        pageIndex = pageIndex.coerceIn(0, pageCount - 1),
-                        label = item.optString("label", ""),
-                        labelKind = if (item.has("label")) labelKind(item.optString("labelKind")) else TabLabelKind.PAGE,
-                        labelPageIndex = item.optInt("labelPage", pageIndex).coerceIn(0, pageCount - 1),
-                        anchorKey = item.optString("anchor", "").takeIf { it.isNotBlank() },
-                        originPageIndex = item.optInt("originPage", pageIndex)
-                            .coerceIn(0, pageCount - 1),
-                    )
+                    restoreTab(item, availablePageCounts)?.let(restored::add)
                 }
             } catch (_: Throwable) {
                 restored.clear()
@@ -174,7 +168,42 @@ class ReaderSessionRepository(context: Context) {
         } else {
             sessionPrefs.getInt(PREF_ACTIVE_TAB, 0).coerceIn(restored.indices)
         }
-        return RestoredReaderTabs(restored, activeTabIndex)
+        return RestoredReaderTabs(
+            restored, activeTabIndex,
+            restoreReference(sessionPrefs.getString(PREF_REFERENCE_JSON, null), availablePageCounts),
+        )
+    }
+
+    internal fun tabJson(tab: ReaderTab): JSONObject = JSONObject()
+        .put("book", tab.bookId)
+        .put("page", tab.pageIndex)
+        .put("label", tab.label)
+        .put("labelKind", tab.labelKind.name)
+        .put("labelPage", tab.labelPageIndex)
+        .put("anchor", tab.anchorKey ?: "")
+        .put("originPage", tab.originPageIndex)
+        .put("originY", tab.originDestinationY?.takeIf(Float::isFinite))
+        .put("pendingY", tab.pendingDestinationY?.takeIf(Float::isFinite))
+
+    private fun restoreReference(json: String?, availablePageCounts: Map<String, Int>): ReaderTab? =
+        json?.let { runCatching { restoreTab(JSONObject(it), availablePageCounts) }.getOrNull() }
+
+    internal fun restoreTab(item: JSONObject, availablePageCounts: Map<String, Int>): ReaderTab? {
+        val bookId = item.getString("book")
+        val pageCount = availablePageCounts[bookId]?.takeIf { it > 0 } ?: return null
+        val page = item.getInt("page")
+        val origin = item.optInt("originPage", page)
+        return ReaderTab(
+            bookId = bookId,
+            pageIndex = page.coerceIn(0, pageCount - 1),
+            label = item.optString("label", ""),
+            labelKind = if (item.has("label")) labelKind(item.optString("labelKind")) else TabLabelKind.PAGE,
+            labelPageIndex = item.optInt("labelPage", page).coerceIn(0, pageCount - 1),
+            anchorKey = item.optString("anchor", "").takeIf { it.isNotBlank() },
+            originPageIndex = origin.coerceIn(0, pageCount - 1),
+            originDestinationY = item.optDouble("originY").toFloat().takeIf { it.isFinite() && origin in 0 until pageCount },
+            pendingDestinationY = item.optDouble("pendingY").toFloat().takeIf { it.isFinite() && page in 0 until pageCount },
+        )
     }
 
     private fun labelKind(value: String?): TabLabelKind =

@@ -49,8 +49,10 @@ Paths such as `maps/level 3.jpg` match campaign-relative paths recorded when add
 
 ## Interface tips (and more)
 
+- With the search field empty, recent searches appear on the left and recently closed tabs on the right, on every screen size. Tap a search to repeat it with its saved mode and scope. Tap a closed tab to restore it in the current tab; **+** opens it in a new tab (hold for the background), and **◨** opens it in the reference pane, at its saved reading position. **More history** expands both columns from 3 to up to 10 entries each; **Less history** collapses them again. Each **⋮** heading menu clears its history. Histories survive app restarts and show materials currently on the table.
 - Tap **+** in a search result to open it in a new tab. Hold it to open the result in a new tab in the background, so you can open several tabs from one search. Results that are already open show **✓** instead of **+**; tap it to switch to the corresponding tab.
 - Hold a tab name or reference indicator for more actions.
+- Choose **Move to reference pane** from a tab menu to move it into the reference pane; an existing document reference takes its place in the tab strip. Choose **Make a regular tab** from the reference menu to bring it back. The last regular tab can only move when there is a document reference to swap with. Document references are restored when you reopen the app.
 - Tap headings in Markdown notes to fold them. It works here too :)
 - Tap the page number at the top right to jump to a specific page.
 - Turn on fullscreen in **Menu → Interface**. The app will even appear over the lock screen, so you can read without unlocking your tablet or phone.

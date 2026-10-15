@@ -12,8 +12,6 @@ The single version source is `app/build.gradle.kts`:
   including features and fixes. Use the release month, not the build machine's clock.
 - `versionCode`: a separate increasing integer; **never reset it** with the month/year.
 - GitHub tag: `v26.09.1`; APK: `NaIgre-26.09.1.apk` for the current candidate.
-- Leave historical tags/changelog entries intact. CalVer is not strict SemVer;
-  do not use a SemVer validator that rejects the leading zero in the month.
 
 | Variant | Application ID | Launcher label | Signing |
 | --- | --- | --- | --- |
@@ -61,7 +59,6 @@ Without `NAIGRE_SIGNING_PROPERTIES`, debug and verification builds work normally
 `assembleRelease` can still produce an **unsigned** APK for contributor build checks;
 `preparePublicRelease` refuses missing credentials. Never upload an unsigned artifact,
 `app-debug.apk`, or the verification APK. Minification/resource shrinking remain disabled.
-
 
 ## Create a signing key once
 

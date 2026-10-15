@@ -19,6 +19,8 @@ data class ReaderTab(
     var originPageIndex: Int = pageIndex,
     var labelKind: TabLabelKind = TabLabelKind.TEXT,
     var labelPageIndex: Int = originPageIndex,
+    var originDestinationY: Float? = null,
+    var pendingDestinationY: Float? = null,
 ) {
     fun setTitle(title: TabTitle) {
         label = title.text

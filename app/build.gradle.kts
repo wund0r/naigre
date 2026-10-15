@@ -48,7 +48,7 @@ android {
         // YY.MM.release: increment the final number for every release within the month.
         // versionCode never resets, even when the calendar month changes.
         versionCode = 65
-        versionName = "26.10.1"
+        versionName = "26.10.2"
         testInstrumentationRunner = "wund0r.naigre.reader.LocalizationTestRunner"
     }
 

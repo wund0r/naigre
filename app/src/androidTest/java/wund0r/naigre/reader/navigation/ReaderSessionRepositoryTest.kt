@@ -12,6 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -86,5 +87,60 @@ class ReaderSessionRepositoryTest {
         assertEquals(9, restored.pageIndex)
         assertEquals(9, restored.originPageIndex)
         assertEquals(9, restored.labelPageIndex)
+    }
+
+    @Test fun documentReferenceAndExactOriginsSurvivePreferencesAndBundle() {
+        val tabs = listOf(ReaderTab.start("notes"))
+        val reference = ReaderTab("book", 12, "", null, 4, TabLabelKind.PAGE, 4,
+            originDestinationY = 124f, pendingDestinationY = 250f)
+        val expected = RestoredReaderTabs(tabs, 0, reference)
+        val available = mapOf("notes" to 1, "book" to 20)
+        repository.saveTabs(tabs, 0, reference)
+        assertEquals(expected, repository.restoreTabs(null, available))
+        val bundle = Bundle()
+        repository.saveTabsToInstanceState(bundle, tabs, 0, reference)
+        assertEquals(expected, repository.restoreTabs(bundle, available))
+        // After promotion, its precise origin also survives as a regular tab.
+        repository.saveTabs(tabs + reference, 1)
+        assertEquals(RestoredReaderTabs(tabs + reference, 1), repository.restoreTabs(null, available))
+        repository.saveTabsToInstanceState(bundle, tabs + reference, 1)
+        assertEquals(RestoredReaderTabs(tabs + reference, 1), repository.restoreTabs(bundle, available))
+    }
+
+    @Test fun closedOrUnavailableReferencesAreNotRestored() {
+        val tabs = listOf(ReaderTab.start("notes"))
+        repository.saveTabs(tabs, 0, ReaderTab.start("book"))
+        assertNull(repository.restoreTabs(null, mapOf("notes" to 1)).reference)
+        repository.saveTabs(tabs, 0)
+        assertNull(repository.restoreTabs(null, mapOf("notes" to 1, "book" to 20)).reference)
+    }
+
+    @Test fun malformedReferenceDoesNotDiscardValidTabs() {
+        val tabs = listOf(ReaderTab.start("notes"))
+        repository.saveTabs(tabs, 0)
+        context.getSharedPreferences("pdf-jump", Context.MODE_PRIVATE).edit()
+            .putString("table-reference-json", "{broken").commit()
+        assertEquals(RestoredReaderTabs(tabs, 0), repository.restoreTabs(null, mapOf("notes" to 1)))
+    }
+
+    @Test fun bundleClearedReferenceOverridesAPersistedReference() {
+        val tabs = listOf(ReaderTab.start("notes"))
+        val available = mapOf("notes" to 1, "book" to 10)
+        repository.saveTabs(tabs, 0, ReaderTab.start("book"))
+        val state = Bundle()
+        repository.saveTabsToInstanceState(state, tabs, 0)
+        assertNull(repository.restoreTabs(state, available).reference)
+    }
+
+    @Test fun shrunkenReferenceClampsPagesAndDropsInvalidExactDestinations() {
+        val reference = ReaderTab("book", 30, "Page", "anchor", 25,
+            originDestinationY = 100f, pendingDestinationY = 200f)
+        repository.saveTabs(listOf(ReaderTab.start("notes")), 0, reference)
+        val restored = repository.restoreTabs(null, mapOf("notes" to 1, "book" to 10)).reference!!
+        assertEquals(9, restored.pageIndex)
+        assertEquals(9, restored.originPageIndex)
+        assertEquals(9, restored.labelPageIndex)
+        assertNull(restored.originDestinationY)
+        assertNull(restored.pendingDestinationY)
     }
 }

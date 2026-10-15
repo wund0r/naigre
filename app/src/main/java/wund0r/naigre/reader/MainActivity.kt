@@ -60,7 +60,13 @@ import wund0r.naigre.reader.navigation.BookmarkSource
 import wund0r.naigre.reader.navigation.ExternalTocParser
 import wund0r.naigre.reader.navigation.FuzzyMatcher
 import wund0r.naigre.reader.navigation.ReaderSessionRepository
+import wund0r.naigre.reader.navigation.ReaderHistoryRepository
+import wund0r.naigre.reader.navigation.RecentSearchMode
+import wund0r.naigre.reader.navigation.RecentSearch
+import wund0r.naigre.reader.navigation.ClosedReaderTab
 import wund0r.naigre.reader.navigation.ReaderTab
+import wund0r.naigre.reader.navigation.ReaderPaneNavigation
+import wund0r.naigre.reader.navigation.ReaderPaneTransition
 import wund0r.naigre.reader.navigation.TabLabelKind
 import wund0r.naigre.reader.navigation.TabTitle
 import wund0r.naigre.reader.markdown.MarkdownDocument
@@ -123,6 +129,11 @@ import wund0r.naigre.reader.table.sourceMetadataChangeSummary
 import wund0r.naigre.reader.table.sourceMetadataNeedsUpdate
 import wund0r.naigre.reader.theme.ReaderThemeMode
 import wund0r.naigre.reader.theme.UiPalette
+import wund0r.naigre.reader.ui.SearchHistoryView
+import wund0r.naigre.reader.ui.SearchResultRow
+import wund0r.naigre.reader.ui.SearchHistoryItem
+import wund0r.naigre.reader.ui.ClosedTabHistoryItem
+import wund0r.naigre.reader.ui.HistoryTabAction
 import wund0r.naigre.reader.work.ReaderWorkCoordinator
 import java.util.UUID
 import java.util.ArrayDeque
@@ -178,14 +189,6 @@ class MainActivity : Activity() {
             R.string.color_amber, R.string.color_teal, R.string.color_rose, R.string.color_olive,
         )
     }
-
-    private data class BookmarkRowHolder(
-        val colorDot: View,
-        val title: TextView,
-        val detail: TextView,
-        val plus: Button,
-        val alongside: Button,
-    )
 
     private data class TextSearchRowHolder(
         val colorDot: View,
@@ -250,20 +253,16 @@ class MainActivity : Activity() {
         val anchorKey: String,
     )
 
-    private data class ReferenceLocation(
-        val bookId: String,
-        var pageIndex: Int,
-        val label: String,
-        val anchorKey: String,
-        var originPageIndex: Int = pageIndex,
-        var originDestinationY: Float? = null,
-        var pendingDestinationY: Float? = originDestinationY,
-    )
-
     private data class PendingViewportRestore(
         val bookId: String,
         val pageIndex: Int,
         val viewport: ReaderSurface.ViewportState,
+    )
+
+    private data class ClosedReadingState(
+        val markdown: MarkdownSurface.ReadingState?,
+        val images: Map<String, ReaderSurface.ViewportState>?,
+        val pdf: PendingViewportRestore?,
     )
 
     private data class EdgeInsets(
@@ -345,6 +344,8 @@ class MainActivity : Activity() {
     private lateinit var libraryStorage: BookLibraryStorage
     private lateinit var documentMetadataReader: DocumentMetadataReader
     private lateinit var readerSessionRepository: ReaderSessionRepository
+    private lateinit var readerHistoryRepository: ReaderHistoryRepository
+    private val closedReadingStates = HashMap<String, ClosedReadingState>()
     private lateinit var textSearchIndex: TextSearchIndexRepository
     private lateinit var textIndexCoordinator: TextIndexCoordinator
     private lateinit var textSearchQueryRunner: TextSearchQueryRunner
@@ -393,12 +394,14 @@ class MainActivity : Activity() {
     private val tabs = mutableListOf<ReaderTab>()
     private var activeTabIndex = 0
     private val tabSearchHighlights = HashMap<String, SearchHighlightTarget>()
-    private val primaryImageViewports = IdentityHashMap<ReaderTab, MutableMap<String, ReaderSurface.ViewportState>>()
-    private val referenceImageViewports = HashMap<String, ReaderSurface.ViewportState>()
-    private val primaryMarkdownStates = IdentityHashMap<ReaderTab, MarkdownSurface.ReadingState>()
+    // A reading session owns its state regardless of which pane currently displays it.
+    private val sessionImageViewports = IdentityHashMap<ReaderTab, MutableMap<String, ReaderSurface.ViewportState>>()
+    private val pdfViewports = IdentityHashMap<ReaderTab, PendingViewportRestore>()
+    private val markdownReadingStates = IdentityHashMap<ReaderTab, MarkdownSurface.ReadingState>()
     private var pendingPrimaryViewportRestore: PendingViewportRestore? = null
     private var pendingReferenceViewportRestore: PendingViewportRestore? = null
-    private var referenceMarkdownState = MarkdownSurface.ReadingState()
+    private val referenceMarkdownState: MarkdownSurface.ReadingState
+        get() = markdownReadingStates.getOrPut(checkNotNull(referenceLocation)) { MarkdownSurface.ReadingState() }
     private var wikiLinkGeneration = 0
 
     private lateinit var root: FrameLayout
@@ -448,7 +451,7 @@ class MainActivity : Activity() {
         if (!destroying) handleBookStorageFailure(failure)
     }
 
-    @Volatile private var referenceLocation: ReferenceLocation? = null
+    @Volatile private var referenceLocation: ReaderTab? = null
     private var primaryDisplayedPageKeys: Set<PageCacheKey> = emptySet()
     private var primaryPendingPageKeys: Set<PageCacheKey> = emptySet()
     private var referenceDisplayedPageKeys: Set<PageCacheKey> = emptySet()
@@ -501,6 +504,7 @@ class MainActivity : Activity() {
         libraryStorage.addListener(bookStorageListener)
         documentMetadataReader = DocumentMetadataReader(this)
         readerSessionRepository = ReaderSessionRepository(this)
+        readerHistoryRepository = ReaderHistoryRepository(this)
         textSearchIndex = TextSearchIndexRepository.shared(this)
         textIndexCoordinator = TextIndexCoordinator.shared(this)
         textIndexCoordinator.addListener(textIndexListener)
@@ -568,7 +572,9 @@ class MainActivity : Activity() {
         tableSessionController.restoreSelection(library.selectedBookIds, books.map { it.id })
         tabs.clear()
         tabSearchHighlights.clear()
-        primaryMarkdownStates.clear()
+        markdownReadingStates.clear()
+        sessionImageViewports.clear()
+        pdfViewports.clear()
         restoreTabs(pendingTabRestoreState)
         pendingTabRestoreState = null
         bookIndexLoadErrors.clear()
@@ -597,6 +603,7 @@ class MainActivity : Activity() {
     private fun hydrateInitialTableIndexes() {
         val generation = catalogLoadGeneration
         val activeId = activeTabOrNull()?.bookId
+        if (referenceLocation?.bookId?.let(::bookById)?.indexLoaded == true) renderReference()
         val requests = selectedBooks()
             .filterNot { it.indexLoaded }
             .sortedBy { if (it.id == activeId) 0 else 1 }
@@ -625,6 +632,7 @@ class MainActivity : Activity() {
                     is BookIndexLoadResult.Loaded -> {
                         val merged = mergeHydratedBookIndex(current, result.book)
                         replaceBook(merged)
+                        if (referenceLocation?.bookId == snapshot.id) renderReference()
                         bookIndexLoadErrors.remove(snapshot.id)
                         scheduleBookTextIndex(merged)
                         if (activeTabOrNull()?.bookId == snapshot.id && pdf == null) {
@@ -767,7 +775,7 @@ class MainActivity : Activity() {
         outState.putBoolean(STATE_QUICKSTART_OPEN, quickstartDialog?.isShowing == true || restoreQuickstartAfterLoad)
         outState.putString(STATE_LIBRARY_FILTER, libraryFilter.kind.name)
         outState.putString(STATE_LIBRARY_TAG, libraryFilter.tagId)
-        readerSessionRepository.saveTabsToInstanceState(outState, tabs, activeTabIndex)
+        readerSessionRepository.saveTabsToInstanceState(outState, tabs, activeTabIndex, referenceLocation)
         super.onSaveInstanceState(outState)
     }
 
@@ -3654,32 +3662,37 @@ class MainActivity : Activity() {
     private fun capturePrimaryImageViewport() {
         val tab = activeTabOrNull() ?: return
         if (bookById(tab.bookId)?.kind == LibraryItemKind.MARKDOWN && primaryMarkdownSurface.visibility == View.VISIBLE) {
-            if (!primaryMarkdownSurface.isShowing(primaryMarkdownStates[tab])) return
+            if (!primaryMarkdownSurface.isShowing(markdownReadingStates[tab])) return
             val viewport = primaryMarkdownSurface.captureViewportState() ?: return
+            markdownReadingStates[tab]?.viewport = viewport
             tab.pageIndex = viewport.sectionIndex
             currentPage = viewport.sectionIndex
             return
         }
-        val displayed = primaryDisplayedPageKeys.singleOrNull() ?: return
-        if (displayed.bookId != tab.bookId) return
-        val uri = imageUri(displayed.bookId, displayed.pageIndex) ?: return
-        val viewport = readerSurface.captureViewportState() ?: return
-        primaryImageViewports.getOrPut(tab, ::HashMap)[uri] = viewport
+        val displayed = primaryDisplayedPageKeys.firstOrNull { it.bookId == tab.bookId && it.pageIndex == tab.pageIndex } ?: return
+        val viewport = readerSurface.captureViewportState(tab.pageIndex) ?: return
+        val uri = imageUri(displayed.bookId, displayed.pageIndex)
+        if (uri != null) sessionImageViewports.getOrPut(tab, ::HashMap)[uri] = viewport
+        else pdfViewports[tab] = PendingViewportRestore(displayed.bookId, displayed.pageIndex, viewport)
     }
 
     private fun captureReferenceImageViewport() {
-        referenceLocation?.takeIf { bookById(it.bookId)?.kind == LibraryItemKind.MARKDOWN }?.let { reference ->
+        val reference = referenceLocation ?: return
+        reference.takeIf { bookById(it.bookId)?.kind == LibraryItemKind.MARKDOWN }?.let {
             if (referenceMarkdownSurface.visibility == View.VISIBLE) {
                 if (!referenceMarkdownSurface.isShowing(referenceMarkdownState)) return
                 val viewport = referenceMarkdownSurface.captureViewportState() ?: return
+                referenceMarkdownState.viewport = viewport
                 reference.pageIndex = viewport.sectionIndex
                 return
             }
         }
         val displayed = referenceDisplayedPageKeys.singleOrNull() ?: return
-        val uri = imageUri(displayed.bookId, displayed.pageIndex) ?: return
+        if (displayed.bookId != reference.bookId || displayed.pageIndex != reference.pageIndex) return
         val viewport = referenceSurface.captureViewportState() ?: return
-        referenceImageViewports["${displayed.bookId}|$uri"] = viewport
+        val uri = imageUri(displayed.bookId, displayed.pageIndex)
+        if (uri != null) sessionImageViewports.getOrPut(reference, ::HashMap)[uri] = viewport
+        else pdfViewports[reference] = PendingViewportRestore(displayed.bookId, displayed.pageIndex, viewport)
     }
 
     private fun stageViewportRestoresForLayout() {
@@ -3699,13 +3712,24 @@ class MainActivity : Activity() {
 
     private fun primaryImageViewport(bookId: String, pageIndex: Int): ReaderSurface.ViewportState? {
         val tab = activeTabOrNull()?.takeIf { it.bookId == bookId } ?: return null
-        val uri = imageUri(bookId, pageIndex) ?: return null
-        return primaryImageViewports[tab]?.get(uri)
+        return sessionViewport(tab, if (bookById(bookId)?.kind == LibraryItemKind.PDF) tab.pageIndex else pageIndex)
     }
 
     private fun referenceImageViewport(bookId: String, pageIndex: Int): ReaderSurface.ViewportState? {
-        val uri = imageUri(bookId, pageIndex) ?: return null
-        return referenceImageViewports["$bookId|$uri"]
+        val reference = referenceLocation?.takeIf { it.bookId == bookId } ?: return null
+        return sessionViewport(reference, pageIndex)
+    }
+
+    private fun sessionViewport(tab: ReaderTab, pageIndex: Int): ReaderSurface.ViewportState? {
+        val uri = imageUri(tab.bookId, pageIndex)
+        return if (uri != null) sessionImageViewports[tab]?.get(uri) else
+            pdfViewports[tab]?.takeIf { it.bookId == tab.bookId && it.pageIndex == pageIndex }?.viewport
+    }
+
+    private fun discardReadingState(tab: ReaderTab) {
+        markdownReadingStates.remove(tab)
+        sessionImageViewports.remove(tab)
+        pdfViewports.remove(tab)
     }
 
     private fun setPrimaryPages(
@@ -3724,7 +3748,14 @@ class MainActivity : Activity() {
             rightPage,
             resetTransform = true,
             viewportState = pendingViewport ?: primaryImageViewport(bookId, firstPage),
+            viewportPageIndex = if (activeBook()?.kind == LibraryItemKind.PDF) activeTabOrNull()?.pageIndex else null,
         )
+        activeTabOrNull()?.takeIf { it.bookId == bookId }?.let { tab ->
+            tab.pendingDestinationY?.let { targetY ->
+                readerSurface.focusOnY(tab.pageIndex, targetY)
+                tab.pendingDestinationY = null
+            }
+        }
     }
 
     private fun setReferencePage(bookId: String, pageIndex: Int, page: RenderedPdfPage) {
@@ -3750,8 +3781,9 @@ class MainActivity : Activity() {
 
     private fun clearCurrentImageViewports() {
         activeTabOrNull()?.let { tab ->
-            primaryMarkdownStates[tab]?.requestNavigation()
-            val saved = primaryImageViewports[tab]
+            pdfViewports.remove(tab)
+            markdownReadingStates[tab]?.requestNavigation()
+            val saved = sessionImageViewports[tab]
             if (saved != null) {
                 imageUri(tab.bookId, tab.pageIndex)?.let { saved.remove(it) }
                 primaryDisplayedPageKeys.singleOrNull()
@@ -3761,13 +3793,14 @@ class MainActivity : Activity() {
             }
         }
         referenceLocation?.let { reference ->
+            pdfViewports.remove(reference)
             if (bookById(reference.bookId)?.kind == LibraryItemKind.MARKDOWN) referenceMarkdownState.requestNavigation()
             imageUri(reference.bookId, reference.pageIndex)?.let { uri ->
-                referenceImageViewports.remove("${reference.bookId}|$uri")
+                sessionImageViewports[reference]?.remove(uri)
             }
             referenceDisplayedPageKeys.singleOrNull()
                 ?.let { displayed -> imageUri(displayed.bookId, displayed.pageIndex)?.let { displayed.bookId to it } }
-                ?.let { (bookId, uri) -> referenceImageViewports.remove("$bookId|$uri") }
+                ?.let { (_, uri) -> sessionImageViewports[reference]?.remove(uri) }
         }
     }
 
@@ -3795,7 +3828,8 @@ class MainActivity : Activity() {
         if (next == currentPage) return
         capturePrimaryImageViewport()
         currentPage = next
-        primaryMarkdownStates[activeTab()]?.requestNavigation()
+        activeTab().pendingDestinationY = null
+        markdownReadingStates[activeTab()]?.requestNavigation()
         activeTab().pageIndex = currentPage
         persistSession()
         // Deliberately do not rebuild tabs: page movement never changes tab identity/name.
@@ -3821,7 +3855,8 @@ class MainActivity : Activity() {
         if (clamped == currentPage) return
         capturePrimaryImageViewport()
         currentPage = clamped
-        primaryMarkdownStates[activeTab()]?.requestNavigation()
+        activeTab().pendingDestinationY = null
+        markdownReadingStates[activeTab()]?.requestNavigation()
         activeTab().pageIndex = clamped
         persistSession()
         renderCurrent()
@@ -3842,7 +3877,8 @@ class MainActivity : Activity() {
     private fun openWikiLink(spec: WikiLinkSpec, alongside: Boolean, source: MarkdownSurface) {
         if (!requireCatalogReady()) return
         val generation = ++wikiLinkGeneration
-        val state = if (source === primaryMarkdownSurface) primaryMarkdownStates[activeTabOrNull()] else referenceMarkdownState
+        val state = if (source === primaryMarkdownSurface) markdownReadingStates[activeTabOrNull()] else
+            referenceLocation?.let { markdownReadingStates[it] }
         val current = {
             !destroying && !isDestroyed && generation == wikiLinkGeneration &&
                 source.visibility == View.VISIBLE && source.isShowing(state)
@@ -4097,7 +4133,7 @@ class MainActivity : Activity() {
         val existing = tabs.indexOfFirst { it.anchorKey == entry.identityKey }
         if (existing >= 0) {
             if (book.kind == LibraryItemKind.MARKDOWN) {
-                primaryMarkdownStates[tabs[existing]]?.requestNavigation()
+                markdownReadingStates[tabs[existing]]?.requestNavigation()
                 activeTabIndex = existing
                 tabs[existing].pageIndex = clamped
                 currentPage = clamped
@@ -4118,13 +4154,15 @@ class MainActivity : Activity() {
                 tabs.last()
             }
             tab.anchorKey?.let(tabSearchHighlights::remove)
-            if (tab.bookId != entry.bookId) primaryMarkdownStates.remove(tab)
-            else primaryMarkdownStates[tab]?.requestNavigation()
+            if (tab.bookId != entry.bookId) discardReadingState(tab)
+            else markdownReadingStates[tab]?.requestNavigation()
             tab.bookId = entry.bookId
             tab.pageIndex = clamped
             tab.setTextTitle(entry.title)
             tab.anchorKey = entry.identityKey
             tab.originPageIndex = clamped
+            tab.originDestinationY = null
+            tab.pendingDestinationY = null
         }
 
         currentPage = clamped
@@ -4153,6 +4191,20 @@ class MainActivity : Activity() {
             return
         }
 
+        openReferenceSession(ReaderTab(
+            bookId = entry.bookId,
+            pageIndex = entry.pageIndex.coerceIn(0, book.pageCount - 1),
+            label = entry.title,
+            anchorKey = entry.identityKey,
+            originPageIndex = entry.pageIndex.coerceIn(0, book.pageCount - 1),
+            originDestinationY = entry.destinationY,
+            pendingDestinationY = entry.destinationY,
+        ))
+    }
+
+    private fun openReferenceSession(next: ReaderTab) {
+        val existing = referenceLocation
+
         val enteringSplit = !hasReferencePane()
         if (enteringSplit) {
             stageViewportRestoresForLayout()
@@ -4162,7 +4214,7 @@ class MainActivity : Activity() {
             capturePrimaryImageViewport()
             captureReferenceImageViewport()
         }
-        val switchingBook = existing != null && existing.bookId != entry.bookId
+        val switchingBook = existing != null && existing.bookId != next.bookId
         val primaryWasShowingTwoPages = enteringSplit &&
             visibleSecondPage(
                 visibleFirstPage(currentPage, activeBook()?.pageCount ?: 1),
@@ -4170,16 +4222,9 @@ class MainActivity : Activity() {
             ) != null
         endTextSearchSession()
         textSearchResultAdapter.notifyDataSetChanged()
-        referenceLocation = ReferenceLocation(
-            bookId = entry.bookId,
-            pageIndex = entry.pageIndex.coerceIn(0, book.pageCount - 1),
-            label = entry.title,
-            anchorKey = entry.identityKey,
-            originPageIndex = entry.pageIndex.coerceIn(0, book.pageCount - 1),
-            originDestinationY = entry.destinationY,
-            pendingDestinationY = entry.destinationY,
-        )
-        referenceMarkdownState = MarkdownSurface.ReadingState()
+        existing?.let(::discardReadingState)
+        referenceLocation = next
+        pendingReferenceViewportRestore = null
         ++prefetchGeneration
         if (switchingBook) {
             referenceSurface.clearPages()
@@ -4189,6 +4234,7 @@ class MainActivity : Activity() {
         }
         updateReferenceUi()
         root.requestApplyInsets()
+        persistSession()
 
         if (enteringSplit) {
             if (primaryWasShowingTwoPages) readerSurface.resetTransform()
@@ -4205,19 +4251,20 @@ class MainActivity : Activity() {
         if (!hasReferencePane()) return
         stageViewportRestoresForLayout()
         ++renderGeneration
+        referenceLocation?.let(::discardReadingState)
         referenceLocation = null
         endTextSearchSession()
         ++referenceRenderGeneration
         ++prefetchGeneration
         referenceSurface.clearPages()
         referenceMarkdownSurface.clear()
-        referenceMarkdownState = MarkdownSurface.ReadingState()
         referenceDisplayedPageKeys = emptySet()
         referencePendingPageKeys = emptySet()
         pendingReferenceViewportRestore = null
         updateReferenceUi()
         updateCachePins()
         root.requestApplyInsets()
+        persistSession()
 
         if (renderPrimary && pdf != null) {
             readerSurface.resetTransform()
@@ -4265,7 +4312,7 @@ class MainActivity : Activity() {
             val book = bookById(reference.bookId)
             val title = listOfNotNull(
                 book?.title?.takeIf(String::isNotBlank),
-                reference.label.takeIf { it.isNotBlank() && it != book?.title },
+                tabLabel(reference).takeIf { it.isNotBlank() && it != book?.title },
             ).joinToString(" · ").ifBlank { getString(R.string.reference) }
             val pageCount = book?.pageCount ?: 0
             val isMarkdown = book?.kind == LibraryItemKind.MARKDOWN
@@ -4329,9 +4376,9 @@ class MainActivity : Activity() {
         if (tabs.size <= 1 || index !in tabs.indices) return
         capturePrimaryImageViewport()
         val removed = tabs.removeAt(index)
+        rememberClosedTabs(listOf(removed))
         removed.anchorKey?.let(tabSearchHighlights::remove)
-        primaryMarkdownStates.remove(removed)
-        primaryImageViewports.remove(removed)
+        discardReadingState(removed)
         activeTabIndex = when {
             index < activeTabIndex -> activeTabIndex - 1
             activeTabIndex >= tabs.size -> tabs.lastIndex
@@ -4346,9 +4393,11 @@ class MainActivity : Activity() {
         if (index !in tabs.indices || tabs.size <= 1) return
         capturePrimaryImageViewport()
         val kept = tabs[index]
+        val previousActive = activeTabOrNull()
+        val removed = tabs.filter { it !== kept }.sortedBy { if (it === previousActive) 0 else 1 }
+        rememberClosedTabs(removed)
         tabs.filter { it !== kept }.mapNotNull { it.anchorKey }.forEach(tabSearchHighlights::remove)
-        tabs.filter { it !== kept }.forEach(primaryImageViewports::remove)
-        tabs.filter { it !== kept }.forEach(primaryMarkdownStates::remove)
+        tabs.filter { it !== kept }.forEach(::discardReadingState)
         tabs.clear()
         tabs += kept
         activeTabIndex = 0
@@ -4357,10 +4406,61 @@ class MainActivity : Activity() {
         activateCurrentTab()
     }
 
+    private fun rememberClosedTabs(closed: List<ReaderTab>) {
+        readerHistoryRepository.recordClosedTabs(closed).zip(closed).forEach { (entry, tab) ->
+            closedReadingStates[entry.id] = ClosedReadingState(
+                markdownReadingStates[tab], sessionImageViewports[tab]?.toMap(), pdfViewports[tab],
+            )
+        }
+        val retained = readerHistoryRepository.closedTabs(books.associate { it.id to it.pageCount }).mapTo(HashSet()) { it.id }
+        closedReadingStates.keys.retainAll(retained)
+    }
+
+    private fun openClosedTab(entry: ClosedReaderTab, action: HistoryTabAction): Boolean {
+        val current = readerHistoryRepository.closedTabs(books.associate { it.id to it.pageCount })
+            .firstOrNull { it.id == entry.id && it.tab.bookId in selectedBookIds } ?: return false
+        val tab = current.tab
+        val state = closedReadingStates[entry.id]
+        state?.markdown?.let { markdownReadingStates[tab] = it }
+        state?.images?.let { sessionImageViewports[tab] = it.toMutableMap() }
+        state?.pdf?.let { pdfViewports[tab] = it }
+        when (action) {
+            HistoryTabAction.REFERENCE -> openReferenceSession(tab)
+            HistoryTabAction.BACKGROUND -> {
+                tabs += tab
+                persistSession()
+                renderTabBar()
+            }
+            HistoryTabAction.NEW_TAB, HistoryTabAction.CURRENT -> {
+                capturePrimaryImageViewport()
+                if (action == HistoryTabAction.NEW_TAB || tabs.isEmpty()) {
+                    tabs += tab
+                    activeTabIndex = tabs.lastIndex
+                } else {
+                    val previous = activeTab()
+                    previous.anchorKey?.let(tabSearchHighlights::remove)
+                    discardReadingState(previous)
+                    tabs[activeTabIndex] = tab
+                }
+                clearPrimaryDisplayedPages()
+                pendingPrimaryViewportRestore = null
+                currentPage = tab.pageIndex
+                persistSession()
+                activateCurrentTab()
+            }
+        }
+        readerHistoryRepository.removeClosedTab(entry.id)
+        closedReadingStates.remove(entry.id)
+        return true
+    }
+
     private fun showTabActions(index: Int) {
         if (index !in tabs.indices) return
         val tab = tabs[index]
         val actions = mutableListOf<Pair<String, () -> Unit>>()
+        if (tabs.size > 1 || referenceLocation != null) {
+            actions += getString(R.string.move_to_reference) to { moveTabToReference(index) }
+        }
         actions += getString(R.string.return_tab_start, pageLocationLabel(tab.bookId, tab.originPageIndex)) to {
             returnTabToStart(index)
         }
@@ -4379,16 +4479,58 @@ class MainActivity : Activity() {
         if (!hasReferencePane()) return
         val actions = mutableListOf<Pair<String, () -> Unit>>()
         referenceLocation?.let { reference ->
+            actions += getString(R.string.make_regular_tab) to { makeReferenceRegularTab() }
             actions += getString(R.string.return_reference_start, pageLocationLabel(reference.bookId, reference.originPageIndex)) to {
                 returnReferenceToStart()
             }
         }
         actions += getString(R.string.close_reference) to { closeReference() }
-        val title = referenceLocation?.label ?: textSearchSession?.let { getString(R.string.search_reference_title, it.query) } ?: getString(R.string.reference)
+        val title = referenceLocation?.let(::tabLabel) ?: textSearchSession?.let { getString(R.string.search_reference_title, it.query) } ?: getString(R.string.reference)
         AlertDialog.Builder(this)
             .setTitle(title)
             .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
             .show()
+    }
+
+    private fun moveTabToReference(index: Int) {
+        val transition = ReaderPaneNavigation.moveToReference(tabs, activeTabIndex, referenceLocation, index) ?: return
+        applyPaneTransition(transition)
+    }
+
+    private fun makeReferenceRegularTab() {
+        val reference = referenceLocation ?: return
+        applyPaneTransition(ReaderPaneNavigation.makeRegularTab(tabs, reference))
+    }
+
+    private fun applyPaneTransition(transition: ReaderPaneTransition) {
+        capturePrimaryImageViewport()
+        captureReferenceImageViewport()
+        ++primaryOpenGeneration
+        primaryOpenTargetBookId = null
+        ++renderGeneration
+        ++referenceRenderGeneration
+        ++prefetchGeneration
+        // Disconnect both surfaces before a session changes owner: inset/layout callbacks
+        // from the old pane must not overwrite the viewport now owned by the other pane.
+        clearAllDisplayedPages()
+        pendingPrimaryViewportRestore = null
+        pendingReferenceViewportRestore = null
+        endTextSearchSession()
+        textSearchResultAdapter.notifyDataSetChanged()
+        tabs.clear()
+        tabs += transition.tabs
+        activeTabIndex = transition.activeTabIndex
+        referenceLocation = transition.reference
+        currentPage = activeTab().pageIndex
+        updateReferenceUi()
+        renderTabBar()
+        updateCachePins()
+        root.requestApplyInsets()
+        persistSession()
+        afterReaderLayout {
+            activateCurrentTab()
+            renderReference()
+        }
     }
 
     private fun pageLocationLabel(bookId: String, pageIndex: Int): String =
@@ -4402,8 +4544,9 @@ class MainActivity : Activity() {
         val tab = tabs.getOrNull(index) ?: return
         val book = bookById(tab.bookId) ?: return
         capturePrimaryImageViewport()
-        primaryMarkdownStates[tab]?.requestNavigation()
+        markdownReadingStates[tab]?.requestNavigation()
         tab.pageIndex = tab.originPageIndex.coerceIn(0, book.pageCount - 1)
+        tab.pendingDestinationY = tab.originDestinationY
         activeTabIndex = index
         currentPage = tab.pageIndex
         persistSession()
@@ -4593,11 +4736,17 @@ class MainActivity : Activity() {
         val availablePageCounts = selectedBooks().associate { it.id to it.pageCount }
         val restored = readerSessionRepository.restoreTabs(state, availablePageCounts)
         tabs += restored.tabs
+        referenceLocation = restored.reference
+        if (tabs.isEmpty()) referenceLocation?.let { reference ->
+            tabs += reference
+            referenceLocation = null
+        }
         if (tabs.isEmpty()) selectedBooks().firstOrNull()?.let { tabs += ReaderTab.start(it.id) }
         if (tabs.isNotEmpty()) {
             activeTabIndex = restored.activeTabIndex.coerceIn(0, tabs.lastIndex)
             currentPage = tabs[activeTabIndex].pageIndex
         }
+        updateReferenceUi()
     }
 
     private fun recordBookmarkVisit(entry: BookmarkEntry) {
@@ -4608,7 +4757,7 @@ class MainActivity : Activity() {
 
     private fun persistSession() {
         // Never replace saved tabs with the temporary empty state shown during catalog recovery.
-        if (catalogReady()) readerSessionRepository.saveTabs(tabs, activeTabIndex)
+        if (catalogReady()) readerSessionRepository.saveTabs(tabs, activeTabIndex, referenceLocation)
         getSharedPreferences(PREFS, MODE_PRIVATE)
             .edit()
             .putBoolean(PREF_SPREAD, spreadMode)
@@ -4737,6 +4886,9 @@ class MainActivity : Activity() {
             setText(initialQuery)
             setSelection(text.length)
         }
+        fun rememberSearch() = readerHistoryRepository.recordSearch(
+            input.text.toString(), RecentSearchMode.valueOf(searchMode.name), searchScopeBookId,
+        )
         inputRow.addView(input, LinearLayout.LayoutParams(0, dp(52), 1f))
         val smartCaseIndicator = TextView(this).apply {
             text = getString(R.string.smartcase_marker)
@@ -4830,6 +4982,7 @@ class MainActivity : Activity() {
         )
 
         val summary = TextView(this).apply {
+            tag = "search-summary"
             textSize = 12f
             setTextColor(uiPalette.textMuted)
             setPadding(dp(4), 0, 0, dp(6))
@@ -4850,7 +5003,7 @@ class MainActivity : Activity() {
             visibility = View.GONE
             contentDescription = getString(R.string.more_navigation_results_description)
         }
-        container.addView(LinearLayout(this).apply {
+        val summaryRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(summary, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -4858,7 +5011,7 @@ class MainActivity : Activity() {
                 bookmarkMoreButton,
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)),
             )
-        })
+        }
         var summaryBase = ""
         var currentScopeSummary = ""
         var bookmarkResultLimit = NAVIGATE_RESULT_PAGE_SIZE
@@ -4875,23 +5028,53 @@ class MainActivity : Activity() {
             dividerHeight = dp(1)
             cacheColorHint = Color.TRANSPARENT
         }
+        val bodyHeader = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val history = SearchHistoryView(this, uiPalette)
+        fun renderHistory() {
+            val searches = readerHistoryRepository.searches()
+                .filter { it.scopeBookId == null || it.scopeBookId in selectedBookIds }
+                .map { entry -> SearchHistoryItem(entry, getString(R.string.history_detail,
+                    getString(if (entry.mode == RecentSearchMode.TEXT) R.string.full_text else R.string.navigate),
+                    entry.scopeBookId?.let(::bookById)?.title ?: getString(R.string.all))) }
+            val closed = readerHistoryRepository.closedTabs(books.associate { it.id to it.pageCount })
+                .filter { it.tab.bookId in selectedBookIds }
+                .map { entry -> ClosedTabHistoryItem(entry, tabLabel(entry.tab),
+                    getString(R.string.history_detail, bookById(entry.tab.bookId)?.title.orEmpty(),
+                        pageLocationLabel(entry.tab.bookId, entry.tab.pageIndex)),
+                    bookById(entry.tab.bookId)?.color ?: uiPalette.textPrimary) }
+            history.showEntries(searches, closed, if (resolvedReaderLayout() == ReaderLayoutMode.WIDE) "◨" else "⬒")
+            history.visibility = if (input.text.isBlank()) View.VISIBLE else View.GONE
+        }
+        history.onClearSearches = { readerHistoryRepository.clearSearches(); renderHistory() }
+        history.onClearTabs = { readerHistoryRepository.clearClosedTabs(); closedReadingStates.clear(); renderHistory() }
+        history.onTab = { entry, action ->
+            if (openClosedTab(entry, action) && action != HistoryTabAction.BACKGROUND) dialog.dismiss()
+            else renderHistory()
+        }
+        bodyHeader.addView(history, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        bodyHeader.addView(summaryRow)
+        list.addHeaderView(bodyHeader, null, false)
         val results = mutableListOf<BookmarkEntry>()
         val adapter = BookmarkResultAdapter(
             items = results,
             onOpen = { entry ->
+                rememberSearch()
                 recordBookmarkVisit(entry)
                 dialog.dismiss()
                 openBookmark(entry, newTabRequested = false)
             },
             onNewTab = { entry ->
+                rememberSearch()
                 recordBookmarkVisit(entry)
                 dialog.dismiss()
                 openBookmark(entry, newTabRequested = true)
             },
             onNewTabInBackground = { entry ->
+                rememberSearch()
                 addBookmarkTabInBackground(entry)
             },
             onAlongside = { entry ->
+                rememberSearch()
                 recordBookmarkVisit(entry)
                 dialog.dismiss()
                 openBookmarkAlongside(entry)
@@ -4904,9 +5087,10 @@ class MainActivity : Activity() {
             if (layout != referenceIconLayout) {
                 referenceIconLayout = layout
                 adapter.notifyDataSetChanged()
+                renderHistory()
             }
         }
-        container.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(560)))
+        container.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(560), 1f))
 
         val textAction = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -4934,7 +5118,7 @@ class MainActivity : Activity() {
             runTextSearch,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)),
         )
-        container.addView(textAction)
+        bodyHeader.addView(textAction)
 
         fun updateBookmarkResults(query: String, resetLimit: Boolean = false) {
             if (resetLimit) bookmarkResultLimit = NAVIGATE_RESULT_PAGE_SIZE
@@ -5021,9 +5205,10 @@ class MainActivity : Activity() {
             textMode.isSelected = mode == SearchMode.TEXT
             bookmarkMode.typeface = if (mode == SearchMode.BOOKMARKS) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             textMode.typeface = if (mode == SearchMode.TEXT) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-            list.visibility = if (mode == SearchMode.BOOKMARKS) View.VISIBLE else View.GONE
             textAction.visibility = if (mode == SearchMode.TEXT) View.VISIBLE else View.GONE
             if (mode == SearchMode.TEXT) {
+                results.clear()
+                adapter.notifyDataSetChanged()
                 bookmarkMoreButton.visibility = View.GONE
                 summaryBase = if (scopedBooks.isEmpty()) {
                     getString(R.string.full_text_images_only)
@@ -5048,11 +5233,21 @@ class MainActivity : Activity() {
 
         bookmarkMode.setOnClickListener { applyMode(SearchMode.BOOKMARKS) }
         textMode.setOnClickListener { applyMode(SearchMode.TEXT) }
+        history.onSearch = { entry ->
+            searchMode = SearchMode.valueOf(entry.mode.name)
+            changeSearchScope(entry.scopeBookId)
+            input.setText(entry.query)
+            input.setSelection(input.text.length)
+            renderScopeRow()
+            applyMode(searchMode)
+            if (searchMode == SearchMode.TEXT) runTextSearch.performClick()
+        }
 
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 val query = s?.toString().orEmpty()
+                history.visibility = if (query.isBlank()) View.VISIBLE else View.GONE
                 if (searchMode == SearchMode.BOOKMARKS) {
                     updateBookmarkResults(query, resetLimit = true)
                 } else {
@@ -5068,6 +5263,7 @@ class MainActivity : Activity() {
                 runTextSearch.performClick()
             } else if (searchMode == SearchMode.BOOKMARKS && results.isNotEmpty()) {
                 adapter.getItem(0).let { entry ->
+                    rememberSearch()
                     recordBookmarkVisit(entry)
                     dialog.dismiss()
                     openBookmark(entry, newTabRequested = false)
@@ -5078,6 +5274,7 @@ class MainActivity : Activity() {
 
         renderScopeRow()
         applyMode(searchMode)
+        renderHistory()
 
         dialog.setContentView(container)
         dialog.window?.let { window ->
@@ -5091,7 +5288,8 @@ class MainActivity : Activity() {
                 gravity = Gravity.TOP
                 windowAnimations = R.style.NaigreNoWindowAnimation
             }
-            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+            @Suppress("DEPRECATION") // Dialog contents still use the fitted window's keyboard height.
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
         dialog.setOnShowListener {
             input.requestFocus()
@@ -5115,91 +5313,14 @@ class MainActivity : Activity() {
         override fun getItemId(position: Int): Long = position.toLong()
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val density = resources.displayMetrics.density
-            fun dp(value: Int) = (value * density).toInt()
             val item = getItem(position)
-
-            val row: LinearLayout
-            val holder: BookmarkRowHolder
-            if (convertView is LinearLayout && convertView.tag is BookmarkRowHolder) {
-                row = convertView
-                holder = convertView.tag as BookmarkRowHolder
-            } else {
-                row = LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(4), dp(4), 0, dp(4))
-                    isClickable = true
-                }
-
-                val colorDot = View(this@MainActivity)
-                row.addView(
-                    colorDot,
-                    LinearLayout.LayoutParams(dp(9), dp(9)).apply {
-                        marginStart = dp(5)
-                        marginEnd = dp(3)
-                    },
-                )
-
-                val textColumn = LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(8), dp(7), dp(8), dp(7))
-                }
-                val title = TextView(this@MainActivity).apply {
-                    textSize = 17f
-                    maxLines = 2
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(uiPalette.textPrimary)
-                }
-                val detail = TextView(this@MainActivity).apply {
-                    textSize = 12f
-                    maxLines = 2
-                    setTextColor(uiPalette.textSecondary)
-                }
-                textColumn.addView(title)
-                textColumn.addView(detail)
-                row.addView(textColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-                val plus = Button(this@MainActivity).apply {
-                    text = "+"
-                    textSize = 22f
-                    isAllCaps = false
-                    minWidth = 0
-                    minimumWidth = 0
-                    minHeight = 0
-                    minimumHeight = 0
-                    setPadding(0, 0, 0, 0)
-                    setTextColor(uiPalette.accent)
-                    background = actionBackground()
-                    elevation = 0f
-                    stateListAnimator = null
-                }
-                row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(48)))
-                val alongside = Button(this@MainActivity).apply {
-                    textSize = 20f
-                    isAllCaps = false
-                    minWidth = 0
-                    minimumWidth = 0
-                    minHeight = 0
-                    minimumHeight = 0
-                    setPadding(0, 0, 0, 0)
-                    setTextColor(uiPalette.accent)
-                    background = actionBackground()
-                    elevation = 0f
-                    stateListAnimator = null
-                }
-                row.addView(alongside, LinearLayout.LayoutParams(dp(48), dp(48)))
-                holder = BookmarkRowHolder(colorDot, title, detail, plus, alongside)
-                row.tag = holder
-            }
+            val row = convertView as? SearchResultRow ?: SearchResultRow(this@MainActivity, uiPalette)
 
             val book = bookById(item.bookId)
-            row.setBackgroundColor(
-                if ((position + 1) % 2 == 0) uiPalette.surfaceRaised else uiPalette.surface,
-            )
-            holder.colorDot.background = circleBackground(book?.color ?: uiPalette.textMuted)
-            holder.title.text = item.title
-            holder.detail.text = when {
+            row.stripe(position)
+            row.setBookColor(book?.color ?: uiPalette.textMuted)
+            row.title.text = item.title
+            row.detail.text = when {
                 book == null -> getString(R.string.missing_library_item)
                 item.source == BookmarkSource.FILE_ROOT && book.kind == LibraryItemKind.IMAGE_COLLECTION ->
                     quantityString(R.plurals.image_album_summary, book.pageCount)
@@ -5220,31 +5341,31 @@ class MainActivity : Activity() {
                 }
             }
             val tabIsOpen = tabs.any { it.anchorKey == item.identityKey }
-            holder.plus.text = if (tabIsOpen) "✓" else "+"
-            holder.plus.textSize = if (tabIsOpen) 18f else 22f
-            holder.plus.contentDescription = if (tabIsOpen) {
+            row.plus.text = if (tabIsOpen) "✓" else "+"
+            row.plus.textSize = if (tabIsOpen) 18f else 22f
+            row.plus.contentDescription = if (tabIsOpen) {
                 getString(R.string.open_existing_tab_description, item.title)
             } else {
                 getString(R.string.open_new_tab_description, item.title)
             }
-            holder.alongside.text = if (resolvedReaderLayout() == ReaderLayoutMode.WIDE) "◨" else "⬒"
-            holder.alongside.contentDescription = getString(R.string.open_reference_description, item.title)
+            row.alongside.text = if (resolvedReaderLayout() == ReaderLayoutMode.WIDE) "◨" else "⬒"
+            row.alongside.contentDescription = getString(R.string.open_reference_description, item.title)
             row.setOnClickListener { onOpen(item) }
-            holder.plus.setOnClickListener {
+            row.plus.setOnClickListener {
                 if (tabs.any { it.anchorKey == item.identityKey }) {
                     onOpen(item)
                 } else {
                     onNewTab(item)
                 }
             }
-            holder.plus.setOnLongClickListener {
+            row.plus.setOnLongClickListener {
                 if (tabs.none { it.anchorKey == item.identityKey }) {
                     onNewTabInBackground(item)
                     notifyDataSetChanged()
                 }
                 true
             }
-            holder.alongside.setOnClickListener { onAlongside(item) }
+            row.alongside.setOnClickListener { onAlongside(item) }
             return row
         }
     }
@@ -5257,6 +5378,7 @@ class MainActivity : Activity() {
             Toast.makeText(this, getString(R.string.images_not_searchable), Toast.LENGTH_SHORT).show()
             return
         }
+        readerHistoryRepository.recordSearch(normalized, RecentSearchMode.TEXT, searchScopeBookId)
 
         val enteringSplit = !hasReferencePane()
         if (enteringSplit) {
@@ -5275,6 +5397,7 @@ class MainActivity : Activity() {
 
         endTextSearchSession()
         searchMode = SearchMode.TEXT
+        referenceLocation?.let(::discardReadingState)
         referenceLocation = null
         ++referenceRenderGeneration
         ++prefetchGeneration
@@ -5293,6 +5416,7 @@ class MainActivity : Activity() {
         updateCachePins()
         updateReferenceUi()
         root.requestApplyInsets()
+        persistSession()
         submitPrefetchWork {
             if (textSearchSession === session && referenceLocation == null) {
                 prefetchPdf?.close()
@@ -5700,7 +5824,7 @@ class MainActivity : Activity() {
 
         val existing = tabs.indexOfFirst { it.anchorKey == anchorKey }
         if (existing >= 0) {
-            primaryMarkdownStates[tabs[existing]]?.requestNavigation()
+            markdownReadingStates[tabs[existing]]?.requestNavigation()
             tabs[existing].pageIndex = pageIndex
             tabs[existing].originPageIndex = pageIndex
             if (existing == activeTabIndex) {
@@ -5719,14 +5843,16 @@ class MainActivity : Activity() {
         } else {
             val tab = activeTab()
             tab.anchorKey?.takeIf { it != anchorKey }?.let(tabSearchHighlights::remove)
-            if (tab.bookId != hit.bookId) primaryMarkdownStates.remove(tab)
-            else primaryMarkdownStates[tab]?.requestNavigation()
+            if (tab.bookId != hit.bookId) discardReadingState(tab)
+            else markdownReadingStates[tab]?.requestNavigation()
             tab.apply {
                 bookId = hit.bookId
                 this.pageIndex = pageIndex
                 setTitle(title)
                 this.anchorKey = anchorKey
                 this.originPageIndex = pageIndex
+                originDestinationY = null
+                pendingDestinationY = null
             }
         }
         currentPage = pageIndex
@@ -5831,7 +5957,7 @@ class MainActivity : Activity() {
         val highlight = activeSearchHighlight?.takeIf {
             it.bookId == bookId && it.pageIndex == currentPage && it.anchorKey == tab.anchorKey
         }
-        val state = primaryMarkdownStates.getOrPut(tab) { MarkdownSurface.ReadingState() }
+        val state = markdownReadingStates.getOrPut(tab) { MarkdownSurface.ReadingState() }
         readerSurface.clearPages()
         readerSurface.visibility = View.GONE
         primaryMarkdownSurface.visibility = View.VISIBLE
@@ -5858,6 +5984,7 @@ class MainActivity : Activity() {
     private fun renderReference() {
         val reference = referenceLocation ?: return
         val book = bookById(reference.bookId) ?: return
+        persistSession()
         val generation = ++referenceRenderGeneration
         val requestedAt = SystemClock.elapsedRealtime()
         updatePageIndicator()
@@ -5895,7 +6022,7 @@ class MainActivity : Activity() {
                             highlightTextColor = uiPalette.textPrimary,
                         )
                         updatePageIndicator()
-                        setStatus("${book.title} · ${reference.label}")
+                        setStatus("${book.title} · ${tabLabel(reference)}")
                     }
                 } catch (t: Throwable) {
                     if (generation == referenceRenderGeneration && reference === referenceLocation) {
@@ -6493,8 +6620,9 @@ class MainActivity : Activity() {
             primaryOpenTargetBookId in transition.removedBookIds
 
         if (transition.closeReference) closeReference(renderPrimary = false)
-        tabs.filter { it.bookId in transition.removedBookIds }.forEach(primaryImageViewports::remove)
-        tabs.filter { it.bookId in transition.removedBookIds }.forEach(primaryMarkdownStates::remove)
+        tabs.filter { it.bookId in transition.removedBookIds }.forEach(sessionImageViewports::remove)
+        tabs.filter { it.bookId in transition.removedBookIds }.forEach(markdownReadingStates::remove)
+        tabs.filter { it.bookId in transition.removedBookIds }.forEach(pdfViewports::remove)
         tabs.filter { it.bookId in transition.removedBookIds }
             .mapNotNull { it.anchorKey }
             .forEach(tabSearchHighlights::remove)
@@ -6502,7 +6630,6 @@ class MainActivity : Activity() {
         tabs += transition.survivingTabs
         transition.removedBookIds.forEach { bookId ->
             textIndexCoordinator.cancel(bookId)
-            referenceImageViewports.keys.removeAll { it.startsWith("$bookId|") }
             pageCache.removeBook(bookId)
             val book = bookById(bookId) ?: return@forEach
             if (book.indexLoaded) {
@@ -7469,6 +7596,8 @@ class MainActivity : Activity() {
         val forgotten = books.filter { it.id in bookIds }
         if (forgotten.isEmpty()) return
         val forgottenIds = forgotten.mapTo(HashSet()) { it.id }
+        readerHistoryRepository.forgetBooks(forgottenIds)
+        closedReadingStates.clear()
         val deletionTokens = forgottenIds.associateWith(tableSessionController::invalidateForgottenBook)
         applyTableSelectionIntent(selectedBookIds - forgottenIds, persistChanges = false)
         forgottenIds.forEach { bookId ->

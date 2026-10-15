@@ -85,6 +85,33 @@ class ReaderSurfaceGestureTest {
         assertEquals(0, taps)
     }
 
+    @Test fun movingTheRightPageOfASpreadKeepsItsOwnFocusAndZoom() = onMain {
+        val spread = surface().apply { layout(0, 0, 1200, 800) }
+        val pane = surface()
+        val bitmap = Bitmap.createBitmap(400, 1000, Bitmap.Config.ARGB_8888)
+        val first = RenderedPdfPage(0, bitmap, PdfRect(0f, 0f, 400f, 1000f), emptyList(), emptyList())
+        val second = first.copy(pageIndex = 1)
+        val viewport = ReaderSurface.ViewportState(3f, 0.6f, 0.7f)
+        try {
+            spread.setPages(first, second, true, viewport, viewportPageIndex = 1)
+            val moved = spread.captureViewportState(1)!!
+            assertEquals(viewport.zoom, moved.zoom, 0.001f)
+            assertEquals(viewport.focusX, moved.focusX, 0.001f)
+            assertEquals(viewport.focusY, moved.focusY, 0.001f)
+            pane.setPages(second, null, true, moved)
+            val inPane = pane.captureViewportState()!!
+            assertEquals(viewport.zoom, inPane.zoom, 0.001f)
+            assertEquals(viewport.focusX, inPane.focusX, 0.001f)
+            assertEquals(viewport.focusY, inPane.focusY, 0.001f)
+            spread.setPages(first, second, true, inPane, viewportPageIndex = 1)
+            assertEquals(moved, spread.captureViewportState(1))
+        } finally {
+            spread.clearPages()
+            pane.clearPages()
+            bitmap.recycle()
+        }
+    }
+
     private fun surface() = ReaderSurface(instrumentation.targetContext).apply {
         layout(0, 0, 600, 800)
     }

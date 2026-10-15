@@ -6,6 +6,8 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
 import android.text.Layout
 import android.text.SpannableString
 import android.text.SpannableStringBuilder
@@ -14,7 +16,7 @@ import android.text.TextPaint
 import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
 import android.text.style.ForegroundColorSpan
-import android.text.style.LeadingMarginSpan
+import android.text.style.ReplacementSpan
 import android.util.AttributeSet
 import android.util.TypedValue
 import android.view.Gravity
@@ -62,7 +64,9 @@ class MarkdownSurface @JvmOverloads constructor(
 
     private val density = resources.displayMetrics.density
     private val foldMarkerSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 24f, resources.displayMetrics)
-    private val foldMarkerMargin = foldMarkerSize.roundToInt() + dp(8)
+    private val foldTouchSize = dp(48)
+    private val foldTouchPadding = dp(8)
+    private val foldGutterWidth = maxOf(foldTouchSize, foldMarkerSize.roundToInt() + dp(8))
     private val scrollView = ScrollView(context).apply {
         isFillViewport = true
         isVerticalScrollBarEnabled = true
@@ -294,29 +298,22 @@ class MarkdownSurface @JvmOverloads constructor(
         scrollView.scrollTo(0, 0)
     }
 
-    private inner class HeadingFoldSpan(val sectionIndex: Int, val mode: MarkdownFoldMode) : ClickableSpan(), LeadingMarginSpan {
+    private inner class HeadingFoldSpan(val sectionIndex: Int, val mode: MarkdownFoldMode) : ClickableSpan() {
         override fun onClick(widget: View) { toggleHeading(sectionIndex) }
         override fun updateDrawState(ds: TextPaint) { /* Keep the normal heading style. */ }
-        override fun getLeadingMargin(first: Boolean): Int = foldMarkerMargin
-        override fun drawLeadingMargin(
-            canvas: Canvas, paint: Paint, x: Int, dir: Int, top: Int, baseline: Int, bottom: Int,
-            text: CharSequence, start: Int, end: Int, first: Boolean, layout: Layout,
-        ) {
-            if (!first) return
-            val savedSize = paint.textSize
-            val savedStyle = paint.style
-            paint.textSize = foldMarkerSize
-            paint.style = Paint.Style.FILL
-            val marker = when (mode) {
-                MarkdownFoldMode.COLLAPSED -> "▸"
-                MarkdownFoldMode.HEADINGS_ONLY -> "▿"
-                MarkdownFoldMode.EXPANDED -> "▾"
-            }
-            canvas.drawText(marker, x + if (dir < 0) -foldMarkerSize else 0f, baseline.toFloat(), paint)
-            paint.textSize = savedSize
-            paint.style = savedStyle
+        val marker: String get() = when (mode) {
+            MarkdownFoldMode.COLLAPSED -> "▸"
+            MarkdownFoldMode.HEADINGS_ONLY -> "▿"
+            MarkdownFoldMode.EXPANDED -> "▾"
         }
     }
+
+    private data class HeadingTouchTarget(
+        val span: HeadingFoldSpan,
+        val bounds: RectF,
+        val arrowLeft: Float,
+        val arrowRight: Float,
+    )
 
     /** A heading tap folds; scrolling, long-press selection, and inline links retain their gestures. */
     private inner class FoldingTextView(context: Context) : TextView(context), WikiLinkSpan.Host {
@@ -332,8 +329,34 @@ class MarkdownSurface @JvmOverloads constructor(
         private var linkHeld = false
         private val tableCellPadding = TableTheme.create(context).tableCellPadding()
         private val linkLongPress = Runnable { if (downLink != null && linkGesture) performLongClick() }
+        private val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val markerClip = Rect()
 
         override fun openWikiLink(spec: WikiLinkSpec) { onWikiLink?.invoke(spec, false) }
+
+        override fun onDraw(canvas: Canvas) {
+            val saved = canvas.save()
+            super.onDraw(canvas)
+            canvas.restoreToCount(saved)
+            val spanned = text as? Spanned ?: return
+            val textLayout = layout ?: return
+            // The padding belongs to every paragraph. Decorations in that gutter
+            // never add a leading margin to a heading or affect its line wrapping.
+            canvas.getClipBounds(markerClip)
+            val first = textLayout.getLineForVertical((markerClip.top - totalPaddingTop).coerceAtLeast(0))
+            val last = textLayout.getLineForVertical(markerClip.bottom - totalPaddingTop)
+            markerPaint.color = currentTextColor
+            markerPaint.textSize = foldMarkerSize
+            markerPaint.typeface = typeface
+            val gutterSave = canvas.save()
+            canvas.clipRect(scrollX, scrollY, scrollX + totalPaddingLeft, scrollY + height)
+            for (span in spanned.getSpans(textLayout.getLineStart(first), textLayout.getLineEnd(last), HeadingFoldSpan::class.java)) {
+                val line = textLayout.getLineForOffset(spanned.getSpanStart(span))
+                val x = scrollX + (totalPaddingLeft - markerPaint.measureText(span.marker)) / 2f
+                canvas.drawText(span.marker, x, (totalPaddingTop + textLayout.getLineBaseline(line)).toFloat(), markerPaint)
+            }
+            canvas.restoreToCount(gutterSave)
+        }
 
         private fun linkAt(event: MotionEvent): WikiLinkSpan? {
             val spanned = text as? Spanned ?: return null
@@ -364,22 +387,25 @@ class MarkdownSurface @JvmOverloads constructor(
             return linkInLayout(spanned, textLayout, x, y)
         }
 
-        private fun linkInLayout(spanned: Spanned, textLayout: Layout, x: Float, y: Int): WikiLinkSpan? {
+        private fun linkInLayout(spanned: Spanned, textLayout: Layout, x: Float, y: Int): WikiLinkSpan? =
+            clickableInLayout(spanned, textLayout, x, y) as? WikiLinkSpan
+
+        private fun clickableInLayout(spanned: Spanned, textLayout: Layout, x: Float, y: Int): ClickableSpan? {
             if (y < 0 || y >= textLayout.height) return null
             val line = textLayout.getLineForVertical(y)
             if (x < textLayout.getLineLeft(line) || x > textLayout.getLineRight(line)) return null
             val offset = textLayout.getOffsetForHorizontal(line, x)
-            return spanned.getSpans(offset, offset, WikiLinkSpan::class.java).firstOrNull {
+            return spanned.getSpans(offset, offset, ClickableSpan::class.java).firstOrNull {
                 val start = maxOf(spanned.getSpanStart(it), textLayout.getLineStart(line))
                 val end = minOf(spanned.getSpanEnd(it), textLayout.getLineEnd(line))
                 val rtl = textLayout.getParagraphDirection(line) < 0
-                val firstX = if (spanned.getSpanStart(it) < start) {
-                    if (rtl) textLayout.getLineRight(line) else textLayout.getLineLeft(line)
-                } else textLayout.getPrimaryHorizontal(start)
+                // Paragraph margins (for example a blockquote) still apply to links
+                // on continuation lines; the fold gutter is outside the text layout.
+                val firstX = textLayout.getPrimaryHorizontal(start)
                 val lastX = if (end == textLayout.getLineEnd(line) && line < textLayout.lineCount - 1) {
                     if (rtl) textLayout.getLineLeft(line) else textLayout.getLineRight(line)
                 } else textLayout.getPrimaryHorizontal(end)
-                start < end && x >= minOf(firstX, lastX) && x <= maxOf(firstX, lastX)
+                it !is HeadingFoldSpan && start < end && x >= minOf(firstX, lastX) && x <= maxOf(firstX, lastX)
             }
         }
 
@@ -426,23 +452,61 @@ class MarkdownSurface @JvmOverloads constructor(
             val spanned = text as? Spanned ?: return null
             val textLayout = layout ?: return null
             val y = event.y.toInt() - totalPaddingTop + scrollY
-            if (y < 0 || y >= textLayout.height) return null
-            val line = textLayout.getLineForVertical(y)
+            if (y < 0 || y >= height - totalPaddingTop + scrollY) return null
             val x = event.x - totalPaddingLeft + scrollX
-            val offset = textLayout.getOffsetForHorizontal(line, x)
-            val withinText = x >= textLayout.getLineLeft(line) && x <= textLayout.getLineRight(line)
-            if (withinText && spanned.getSpans(offset, offset, ClickableSpan::class.java).any { it !is HeadingFoldSpan }) return null
-            return spanned.getSpans(textLayout.getLineStart(line), textLayout.getLineEnd(line), HeadingFoldSpan::class.java)
-                .firstOrNull { spanned.getSpanStart(it) < textLayout.getLineEnd(line) && spanned.getSpanEnd(it) > textLayout.getLineStart(line) }
+            val reach = maxOf(foldTouchPadding, foldTouchSize / 2)
+            val fromLine = textLayout.getLineForVertical((y - reach).coerceAtLeast(0))
+            val toLine = textLayout.getLineForVertical(y + reach)
+            val targets = spanned.getSpans(textLayout.getLineStart(fromLine), textLayout.getLineEnd(toLine), HeadingFoldSpan::class.java)
+                .map { headingTouchTarget(spanned, textLayout, it) }.filter { it.bounds.contains(x, y.toFloat()) }
+
+            // A link's nearest text offset can be its first character even when the
+            // finger is over the arrow. Resolve the gutter before testing link bounds.
+            targets.firstOrNull { x >= it.arrowLeft && x < it.arrowRight }?.let { return it.span }
+            if (clickableInLayout(spanned, textLayout, x, y) != null) return null
+            return targets.firstOrNull()?.span
+        }
+
+        private fun headingTouchTarget(spanned: Spanned, textLayout: Layout, span: HeadingFoldSpan): HeadingTouchTarget {
+            val start = spanned.getSpanStart(span)
+            val end = spanned.getSpanEnd(span)
+            val first = textLayout.getLineForOffset(start)
+            val last = textLayout.getLineForOffset(maxOf(start, end - 1))
+            val top = textLayout.getLineTop(first).toFloat()
+            val bottom = textLayout.getLineBottom(last).toFloat()
+            var before = first - 1
+            while (before >= 0 && !lineHasContent(spanned, textLayout, before)) before--
+            var after = last + 1
+            while (after < textLayout.lineCount && !lineHasContent(spanned, textLayout, after)) after++
+            // Share empty gaps with adjacent rows, never extending into their text or
+            // into a replacement span such as a table or horizontal rule.
+            val topLimit = if (before >= 0) (textLayout.getLineBottom(before) + top) / 2f else 0f
+            val bottomLimit = if (after < textLayout.lineCount) (bottom + textLayout.getLineTop(after)) / 2f
+                else (height - totalPaddingTop + scrollY).toFloat()
+            val extra = maxOf(foldTouchPadding.toFloat(), (foldTouchSize - (bottom - top)) / 2f)
+            val gutterLeft = (scrollX - totalPaddingLeft).toFloat()
+            return HeadingTouchTarget(
+                span, RectF(gutterLeft, maxOf(topLimit, top - extra), textLayout.width.toFloat(), minOf(bottomLimit, bottom + extra)),
+                gutterLeft, scrollX.toFloat(),
+            )
+        }
+
+        private fun lineHasContent(spanned: Spanned, textLayout: Layout, line: Int): Boolean {
+            val start = textLayout.getLineStart(line)
+            val end = textLayout.getLineEnd(line)
+            return (start until end).any { !spanned[it].isWhitespace() } ||
+                spanned.getSpans(start, end, ReplacementSpan::class.java).any {
+                    spanned.getSpanStart(it) < end && spanned.getSpanEnd(it) > start
+                }
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     cancelWikiGesture()
-                    downLink = linkAt(event)
-                    linkGesture = downLink != null
                     downHeading = headingAt(event)
+                    downLink = if (downHeading == null) linkAt(event) else null
+                    linkGesture = downLink != null
                     downX = event.x
                     downY = event.y
                     if (linkGesture) {
@@ -504,7 +568,7 @@ class MarkdownSurface @JvmOverloads constructor(
 
     private fun applyInsets() {
         scrollView.setPadding(contentInsets[0], contentInsets[1], contentInsets[2], contentInsets[3])
-        textView.setPadding(0, 0, 0, contentInsets[4])
+        textView.setPadding(foldGutterWidth, 0, 0, contentInsets[4])
     }
 
     private fun dp(value: Int): Int = (value * density).toInt()

@@ -147,11 +147,13 @@ class ReaderSurface(context: Context) : View(context) {
         rightPage: RenderedPdfPage?,
         resetTransform: Boolean,
         viewportState: ViewportState? = null,
+        viewportPageIndex: Int? = null,
     ) {
         left = leftPage
         right = rightPage
         if (viewportState != null) {
-            restoreViewportState(viewportState)
+            if (viewportPageIndex == null) restoreViewportState(viewportState)
+            else restorePageViewportState(viewportPageIndex, viewportState)
         } else if (resetTransform) {
             zoom = 1f
             panX = 0f
@@ -171,6 +173,44 @@ class ReaderSurface(context: Context) : View(context) {
             focusX = ((width / 2f - origin.first) / dimensions.first).coerceIn(0f, 1f),
             focusY = ((height / 2f - origin.second) / dimensions.second).coerceIn(0f, 1f),
         )
+    }
+
+    /** A session can move between a two-page spread and a single-page pane. */
+    fun captureViewportState(pageIndex: Int): ViewportState? {
+        val rect = viewportPageRect(pageIndex) ?: return null
+        return ViewportState(
+            zoom,
+            ((width / 2f - rect.left) / rect.width()).coerceIn(0f, 1f),
+            ((height / 2f - rect.top) / rect.height()).coerceIn(0f, 1f),
+        )
+    }
+
+    private fun restorePageViewportState(pageIndex: Int, state: ViewportState) {
+        zoom = state.zoom.coerceIn(1f, 4f)
+        val rect = viewportPageRect(pageIndex) ?: return
+        panX += width / 2f - (rect.left + rect.width() * state.focusX.coerceIn(0f, 1f))
+        panY += height / 2f - (rect.top + rect.height() * state.focusY.coerceIn(0f, 1f))
+    }
+
+    private fun viewportPageRect(pageIndex: Int): RectF? {
+        val pages = listOfNotNull(left, right)
+        if (pages.isEmpty() || width <= 0 || height <= 0) return null
+        val dimensions = contentDimensions(pages, zoom)
+        val origin = computeOrigin(dimensions.first, dimensions.second)
+        val rawWidth = pages.sumOf { it.bitmap.width.toDouble() }.toFloat() + if (pages.size > 1) gapPx else 0f
+        val rawHeight = pages.maxOf { it.bitmap.height }.toFloat()
+        val scale = initialFitScale(pages, rawWidth, rawHeight) * zoom
+        var x = origin.first
+        for (page in pages) {
+            val pageWidth = page.bitmap.width * scale
+            val pageHeight = page.bitmap.height * scale
+            if (page.pageIndex == pageIndex) {
+                val y = if (dimensions.second < height) (height - pageHeight) / 2f else origin.second
+                return RectF(x, y, x + pageWidth, y + pageHeight)
+            }
+            x += pageWidth + gapPx * scale
+        }
+        return null
     }
 
     fun clearPages() {

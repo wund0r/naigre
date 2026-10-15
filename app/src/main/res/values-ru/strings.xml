@@ -20,12 +20,26 @@
   <string name="diagnostics">Диагностика</string>
   <string name="edit">Правка</string>
   <string name="close_reference">Закрыть выноску</string>
+  <string name="move_to_reference">Переместить в выноску</string>
+  <string name="make_regular_tab">Сделать обычной вкладкой</string>
   <string name="close_others">Закрыть остальные</string>
   <string name="reference">Выноска</string>
   <string name="all">Все</string>
   <!-- Compact search-mode labels; descriptions spell out their meaning. -->
   <string name="navigate">Закладки</string>
   <string name="full_text">Текст</string>
+  <string name="recent_searches">Недавние поиски</string>
+  <string name="recently_closed_tabs">Недавно закрытые</string>
+  <string name="more_history">Больше истории</string>
+  <string name="less_history">Меньше истории</string>
+  <string name="no_recent_searches">Нет недавних поисков</string>
+  <string name="no_closed_tabs">Нет закрытых вкладок</string>
+  <string name="clear_recent_searches">Очистить недавние поиски</string>
+  <string name="clear_closed_tabs">Очистить закрытые вкладки</string>
+  <string name="history_detail">%1$s · %2$s</string>
+  <string name="history_heading">%1$s  ⋮</string>
+  <string name="repeat_search_description">Повторить поиск %1$s · %2$s</string>
+  <string name="restore_recent_tab_description">Восстановить %1$s в текущей вкладке</string>
   <string name="failed">Ошибка</string>
   <string name="searching">Поиск…</string>
   <string name="add_file">Добавить файл</string>

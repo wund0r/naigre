@@ -87,8 +87,8 @@ class WikiLinkRenderingTest {
         assertTrue(target.layout.getLineForOffset(spanned.getSpanEnd(span)) > line)
         var taps = 0
         surface.onWikiLink = { _, _ -> taps++ }
-        val x = (target.layout.getPrimaryHorizontal(start) + target.layout.getLineRight(line)) / 2f
-        val y = (target.layout.getLineTop(line) + target.layout.getLineBottom(line)) / 2f
+        val x = target.totalPaddingLeft + (target.layout.getPrimaryHorizontal(start) + target.layout.getLineRight(line)) / 2f
+        val y = target.totalPaddingTop + (target.layout.getLineTop(line) + target.layout.getLineBottom(line)) / 2f
         val now = SystemClock.uptimeMillis()
         listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP).forEachIndexed { index, action ->
             val event = MotionEvent.obtain(now, now + index * 40, action, x, y, 0)
@@ -163,8 +163,8 @@ class WikiLinkRenderingTest {
         val start = spanned.getSpanStart(span)
         val end = spanned.getSpanEnd(span)
         val line = target.layout.getLineForOffset(start)
-        val x = (target.layout.getPrimaryHorizontal(start) + target.layout.getPrimaryHorizontal(end)) / 2f
-        val y = (target.layout.getLineTop(line) + target.layout.getLineBottom(line)) / 2f
+        val x = target.totalPaddingLeft + (target.layout.getPrimaryHorizontal(start) + target.layout.getPrimaryHorizontal(end)) / 2f
+        val y = target.totalPaddingTop + (target.layout.getLineTop(line) + target.layout.getLineBottom(line)) / 2f
         val now = SystemClock.uptimeMillis()
         fun send(action: Int, at: Long, targetY: Float = y) {
             val event = MotionEvent.obtain(now, at, action, x, targetY, 0)

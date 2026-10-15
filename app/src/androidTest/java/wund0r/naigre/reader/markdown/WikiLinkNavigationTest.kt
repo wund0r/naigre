@@ -6,13 +6,19 @@ import android.app.Dialog
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Canvas
 import android.net.Uri
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
+import android.view.KeyEvent
+import android.view.WindowManager
 import android.view.inspector.WindowInspector
 import android.widget.Button
 import android.widget.ListView
+import android.widget.ScrollView
+import android.widget.EditText
+import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.filters.SdkSuppress
 import androidx.test.platform.app.InstrumentationRegistry
@@ -24,9 +30,12 @@ import wund0r.naigre.reader.MainActivity
 import wund0r.naigre.reader.R
 import wund0r.naigre.reader.navigation.*
 import wund0r.naigre.reader.render.MarkdownSurface
+import wund0r.naigre.reader.render.ReaderSurface
 import wund0r.naigre.reader.search.TextIndexCoordinator
 import wund0r.naigre.reader.search.TextSearchIndexRepository
 import wund0r.naigre.reader.table.*
+import wund0r.naigre.reader.ui.SearchHistoryView
+import wund0r.naigre.reader.ui.SearchResultRow
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
@@ -60,13 +69,17 @@ class WikiLinkNavigationTest {
             originalCatalog = catalog.readBytes()
         }
         directory = File(context.cacheDir, "wiki-${UUID.randomUUID()}").apply { mkdirs() }
-        listOf("pdf-jump", "bookmark-visits-v2").forEach { name ->
+        listOf("pdf-jump", "bookmark-visits-v2", "reader-history").forEach { name ->
             preferences[name] = context.getSharedPreferences(name, Context.MODE_PRIVATE).all
             context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
         }
         fun document(name: String, kind: LibraryItemKind): BookRecord {
             val source = File(directory, name).apply { parentFile!!.mkdirs() }
-            if (kind == LibraryItemKind.PDF) writePdf(source, 20) else source.writeText("# Notes\n\n[[downtime.pdf#page=12|Pazuzu]]\n\n[[maps/level 3.jpg]]\n\nSome notes.")
+            if (kind == LibraryItemKind.PDF) writePdf(source, 20) else source.writeText(
+                "# Notes\n\n[[downtime.pdf#page=12|Pazuzu]]\n\n[[maps/level 3.jpg]]\n\nSome notes.\n\n" +
+                    "## Fold me\n\nHidden body.\n\n## Long section\n\n" +
+                    (1..80).joinToString("\n\n") { "Paragraph $it with enough text to scroll through the note." },
+            )
             val content = if (kind == LibraryItemKind.MARKDOWN) MarkdownEngine(context).parse(source.readText()) else null
             val id = UUID.randomUUID().toString()
             return BookRecord(
@@ -165,6 +178,468 @@ class WikiLinkNavigationTest {
             assertEquals(1, reference.javaClass.getDeclaredField("pageIndex").apply { isAccessible = true }.getInt(reference))
             assertEquals(2, tabs(it).size)
         }
+    }
+
+    @Test fun pageTabMovesThroughBothLongPressMenusAndKeepsItsOrigin() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        scenario!!.onActivity { invoke(it, "jumpCurrentTab", 13) }
+        awaitPrimarySurface()
+        var moved: ReaderTab? = null
+        scenario!!.onActivity {
+            moved = tabs(it).last()
+            setZoom(field(it, "readerSurface"), 2f)
+            val strip = field<ViewGroup>(it, "tabBar")
+            assertTrue(strip.getChildAt(1).performLongClick())
+        }
+        clickMenuAction(R.string.move_to_reference)
+        awaitReference(pdf.id, 13)
+        scenario!!.onActivity {
+            assertSame(moved, field<ReaderTab>(it, "referenceLocation"))
+            assertEquals(note.id, tabs(it).single().bookId)
+            assertEquals(11, moved!!.originPageIndex)
+            assertEquals(2f, field<ReaderSurface>(it, "referenceSurface").captureViewportState()!!.zoom, 0.001f)
+            assertTrue(field<View>(it, "referenceIndicatorTitle").performLongClick())
+        }
+        clickMenuAction(R.string.make_regular_tab)
+        awaitBook(pdf.id, 13)
+        awaitPrimarySurface()
+        scenario!!.onActivity {
+            assertNull(field<ReaderTab?>(it, "referenceLocation"))
+            assertSame(moved, tabs(it).last())
+            assertEquals(2f, field<ReaderSurface>(it, "readerSurface").captureViewportState()!!.zoom, 0.001f)
+            invoke(it, "returnTabToStart", 1)
+        }
+        awaitBook(pdf.id, 11)
+    }
+
+    @Test fun backgroundSwapKeepsActiveTabAndDistinctSessionsForTheSameBook() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        backToNotes()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Reference copy"), alongside = true)
+        awaitReference(pdf.id, 11)
+        var moved: ReaderTab? = null
+        var previousReference: ReaderTab? = null
+        scenario!!.onActivity {
+            moved = tabs(it)[1]
+            previousReference = field(it, "referenceLocation")
+            invoke(it, "jumpReference", 16)
+        }
+        awaitReference(pdf.id, 16)
+        scenario!!.onActivity { invoke(it, "moveTabToReference", 1) }
+        awaitReference(pdf.id, 11)
+        scenario!!.onActivity {
+            assertEquals(0, field<Int>(it, "activeTabIndex"))
+            assertEquals(note.id, field<String>(it, "pdfBookId"))
+            assertSame(previousReference, tabs(it)[1])
+            assertEquals(16, tabs(it)[1].pageIndex)
+            assertSame(moved, field<ReaderTab>(it, "referenceLocation"))
+            invoke(it, "moveTabToReference", 0)
+        }
+        awaitBook(pdf.id, 11)
+        awaitReference(note.id, 0)
+        scenario!!.onActivity {
+            assertSame(moved, tabs(it)[0])
+            assertEquals(2, tabs(it).size)
+        }
+    }
+
+    @Test fun lastTabCannotMoveWithoutAReferenceButCanSwapWithOne() {
+        launch()
+        scenario!!.onActivity { invoke(it, "showTabActions", 0) }
+        assertFalse(menuContains(R.string.move_to_reference))
+        instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        scenario!!.onActivity { invoke(it, "moveTabToReference", 0) }
+        scenario!!.onActivity { assertNull(field<ReaderTab?>(it, "referenceLocation")) }
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"), alongside = true)
+        awaitReference(pdf.id, 11)
+        scenario!!.onActivity { invoke(it, "showTabActions", 0) }
+        clickMenuAction(R.string.move_to_reference)
+        awaitBook(pdf.id, 11)
+        awaitReference(note.id, 0)
+        scenario!!.onActivity { assertEquals(1, tabs(it).size) }
+    }
+
+    @Test fun referenceAndPromotedTabSurviveRecreationAndColdLaunch() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        scenario!!.onActivity { invoke(it, "moveTabToReference", 1) }
+        awaitReference(pdf.id, 11)
+        scenario!!.recreate()
+        awaitReference(pdf.id, 11)
+        scenario!!.onActivity {
+            assertEquals("Pazuzu", field<ReaderTab>(it, "referenceLocation").label)
+            invoke(it, "jumpReference", 15)
+        }
+        awaitReference(pdf.id, 15)
+        scenario!!.close()
+        launch()
+        awaitReference(pdf.id, 15)
+        scenario!!.onActivity { invoke(it, "makeReferenceRegularTab") }
+        awaitBook(pdf.id, 15)
+        scenario!!.close()
+        scenario = ActivityScenario.launch(MainActivity::class.java)
+        awaitBook(pdf.id, 15)
+        scenario!!.onActivity {
+            assertNull(field<ReaderTab?>(it, "referenceLocation"))
+            assertEquals(11, tabs(it).last().originPageIndex)
+            assertEquals(2, tabs(it).size)
+        }
+    }
+
+    @Test fun closedReferenceAndTableRemovalDoNotResurrectAfterRestart() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"), alongside = true)
+        awaitReference(pdf.id, 11)
+        scenario!!.onActivity { invoke(it, "closeReference", true) }
+        scenario!!.close()
+        launch()
+        scenario!!.onActivity { assertNull(field<ReaderTab?>(it, "referenceLocation")) }
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"), alongside = true)
+        awaitReference(pdf.id, 11)
+        scenario!!.onActivity {
+            invoke(it, "applyTableSelectionIntent", selected(it) - pdf.id, true, true)
+        }
+        scenario!!.close()
+        launch()
+        scenario!!.onActivity {
+            assertNull(field<ReaderTab?>(it, "referenceLocation"))
+            assertFalse(pdf.id in selected(it))
+        }
+    }
+
+    @Test fun sameImageSessionsRetainSeparateZoomWhenSwappedInWideAndTallLayouts() {
+        launch()
+        open(WikiLinkSpec("maps/level 3.jpg"))
+        awaitBook(maps.id, 1)
+        awaitPrimarySurface()
+        scenario!!.onActivity { invoke(it, "openBookmarkAlongside", maps.pdfBookmarks[1]) }
+        awaitReference(maps.id, 1)
+        for (layout in listOf("WIDE", "TALL")) {
+            scenario!!.onActivity {
+                val type = field<Any>(it, "readerLayoutMode").javaClass
+                invoke(it, "setReaderLayoutMode", type.enumConstants!!.single { value -> (value as Enum<*>).name == layout })
+            }
+            awaitPrimarySurface()
+            awaitReference(maps.id, 1)
+            scenario!!.onActivity {
+                setZoom(field(it, "readerSurface"), 2f)
+                setZoom(field(it, "referenceSurface"), 3f)
+                invoke(it, "moveTabToReference", 1)
+            }
+            awaitPrimarySurface()
+            awaitReference(maps.id, 1)
+            scenario!!.onActivity {
+                assertEquals(3f, field<ReaderSurface>(it, "readerSurface").captureViewportState()!!.zoom, 0.001f)
+                assertEquals(2f, field<ReaderSurface>(it, "referenceSurface").captureViewportState()!!.zoom, 0.001f)
+            }
+        }
+        scenario!!.onActivity { invoke(it, "makeReferenceRegularTab") }
+        awaitPrimarySurface()
+        scenario!!.onActivity {
+            assertEquals(3, tabs(it).size)
+            assertEquals(2f, field<ReaderSurface>(it, "readerSurface").captureViewportState()!!.zoom, 0.001f)
+        }
+    }
+
+    @Test fun foldedNoteKeepsItsScrollAndFoldStateThroughMoveAndPromotion() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        backToNotes()
+        var state: MarkdownSurface.ReadingState? = null
+        var viewport: MarkdownSurface.ViewportState? = null
+        scenario!!.onActivity {
+            val surface = field<MarkdownSurface>(it, "primaryMarkdownSurface")
+            surface.toggleHeading(1)
+        }
+        instrumentation.waitForIdleSync()
+        scenario!!.onActivity {
+            val surface = field<MarkdownSurface>(it, "primaryMarkdownSurface")
+            (surface.getChildAt(0) as ScrollView).scrollTo(0, 900)
+        }
+        instrumentation.waitForIdleSync()
+        scenario!!.onActivity {
+            val surface = field<MarkdownSurface>(it, "primaryMarkdownSurface")
+            state = field<Map<ReaderTab, MarkdownSurface.ReadingState>>(it, "markdownReadingStates")[tabs(it)[0]]!!
+            viewport = surface.captureViewportState()!!
+            assertTrue(viewport!!.sectionProgress > 0f)
+            invoke(it, "moveTabToReference", 0)
+        }
+        awaitReference(note.id, viewport!!.sectionIndex)
+        scenario!!.onActivity {
+            assertTrue(field<MarkdownSurface>(it, "referenceMarkdownSurface").isShowing(state))
+            assertTrue(state!!.folds.sectionModes.isNotEmpty())
+            assertEquals(viewport!!.sectionProgress, state!!.viewport!!.sectionProgress, 0.03f)
+            invoke(it, "makeReferenceRegularTab")
+        }
+        awaitBook(note.id, viewport!!.sectionIndex)
+        await {
+            var shown = false
+            scenario!!.onActivity { shown = field<MarkdownSurface>(it, "primaryMarkdownSurface").isShowing(state) }
+            shown
+        }
+        scenario!!.onActivity {
+            assertTrue(state!!.folds.sectionModes.isNotEmpty())
+            assertEquals(viewport!!.sectionProgress, state!!.viewport!!.sectionProgress, 0.03f)
+        }
+    }
+
+    @Test fun movingTabReplacesSearchResultsAndSearchMenuCannotPromoteThem() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        backToNotes()
+        scenario!!.onActivity { invoke(it, "showTextSearchReference", "Some") }
+        scenario!!.onActivity { assertTrue(field<View>(it, "referenceIndicatorTitle").performLongClick()) }
+        assertFalse(menuContains(R.string.make_regular_tab))
+        instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        scenario!!.onActivity { invoke(it, "moveTabToReference", 1) }
+        awaitReference(pdf.id, 11)
+        scenario!!.onActivity {
+            assertNull(field<Any?>(it, "textSearchSession"))
+            assertEquals(note.id, field<String>(it, "pdfBookId"))
+        }
+    }
+
+    @Test fun recentTabPlusRestoresTheClosedPositionAsADistinctSession() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        scenario!!.onActivity { invoke(it, "jumpCurrentTab", 13) }
+        awaitPrimarySurface()
+        scenario!!.onActivity { setZoom(field(it, "readerSurface"), 2f) }
+        scenario!!.onActivity { invoke(it, "closeTab", 1) }
+        awaitBook(note.id, 0)
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        val root = searchOverlay()
+        saveOverlay(root)
+        instrumentation.runOnMainSync { historyTabs(root).filterIsInstance<Button>().first { it.text == "+" }.performClick() }
+        awaitBook(pdf.id, 13)
+        awaitPrimarySurface()
+        scenario!!.onActivity {
+            assertEquals(3, tabs(it).size)
+            assertEquals(11, tabs(it)[1].pageIndex)
+            assertEquals(11, tabs(it).last().originPageIndex)
+            assertEquals(2f, field<ReaderSurface>(it, "readerSurface").captureViewportState()!!.zoom, 0.001f)
+        }
+        assertTrue(ReaderHistoryRepository(context).closedTabs(mapOf(pdf.id to 20)).isEmpty())
+    }
+
+    @Test fun recentTabButtonsRestoreInBackgroundAndInTheReferencePane() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        scenario!!.onActivity { invoke(it, "jumpCurrentTab", 13) }
+        awaitPrimarySurface()
+        scenario!!.onActivity { invoke(it, "closeTab", 1) }
+        awaitBook(note.id, 0)
+        val root = searchOverlay()
+        instrumentation.runOnMainSync { assertTrue(historyTabs(root).filterIsInstance<Button>().first { it.text == "+" }.performLongClick()) }
+        scenario!!.onActivity {
+            assertEquals(2, tabs(it).size)
+            assertEquals(note.id, field<String>(it, "pdfBookId"))
+            assertEquals(13, tabs(it)[1].pageIndex)
+        }
+        assertTrue(root.isShown)
+        instrumentation.runOnMainSync { descendants(root).filterIsInstance<Button>()
+            .first { it.contentDescription == context.getString(R.string.close_search_description) }.performClick() }
+        scenario!!.onActivity { invoke(it, "closeTab", 1) }
+        val next = searchOverlay()
+        instrumentation.runOnMainSync { historyTabs(next).filterIsInstance<Button>().first { it.text.toString() in listOf("◨", "⬒") }.performClick() }
+        awaitReference(pdf.id, 13)
+        scenario!!.onActivity {
+            assertEquals(1, tabs(it).size)
+            assertEquals(11, field<ReaderTab>(it, "referenceLocation").originPageIndex)
+        }
+    }
+
+    @Test fun sharedHistoryToggleKeepsBothColumnsExpandedAfterABackgroundRestore() {
+        launch()
+        val repository = ReaderHistoryRepository(context)
+        (1..12).forEach { repository.recordSearch("Query $it", RecentSearchMode.BOOKMARKS, note.id) }
+        repository.recordClosedTabs((0 until 12).map { ReaderTab(pdf.id, it, "Pazuzu $it") })
+        val root = searchOverlay()
+        fun rows(tag: String) = descendants(root.findViewWithTag(tag)).filterIsInstance<SearchResultRow>().toList()
+        instrumentation.runOnMainSync {
+            assertEquals(3, rows("recent-searches-column").size)
+            assertEquals(3, rows("recent-tabs-column").size)
+        }
+        saveOverlay(root, "search-history-overlay-more.png")
+        instrumentation.runOnMainSync {
+            root.findViewWithTag<Button>("more-history").performClick()
+            assertEquals(10, rows("recent-searches-column").size)
+            assertEquals(10, rows("recent-tabs-column").size)
+            assertTrue(rows("recent-tabs-column").first().plus.performLongClick())
+            assertEquals(10, rows("recent-searches-column").size)
+            assertEquals(10, rows("recent-tabs-column").size)
+            assertEquals(context.getString(R.string.less_history), root.findViewWithTag<Button>("more-history").text)
+        }
+        scenario!!.onActivity {
+            assertEquals(2, tabs(it).size)
+            assertEquals(note.id, field<String>(it, "pdfBookId"))
+        }
+        assertEquals(11, repository.closedTabs(mapOf(pdf.id to 20)).size)
+        instrumentation.waitForIdleSync()
+        instrumentation.runOnMainSync {
+            assertTrue(root.isShown)
+            val list = descendants(root).filterIsInstance<ListView>().single()
+            assertTrue(list.canScrollVertically(1))
+            root.findViewWithTag<Button>("more-history").performClick()
+            assertEquals(3, rows("recent-searches-column").size)
+            assertEquals(3, rows("recent-tabs-column").size)
+        }
+    }
+
+    @Test fun phoneWidthOverlayKeepsBothColumnsAndScrollsToTheResults() {
+        launch()
+        ReaderHistoryRepository(context).apply {
+            recordSearch("Long section", RecentSearchMode.BOOKMARKS, note.id)
+            recordClosedTabs(listOf(ReaderTab(pdf.id, 13, "Pazuzu", "anchor", 11)))
+        }
+        val root = searchOverlay()
+        val density = context.resources.displayMetrics.density
+        scenario!!.onActivity {
+            val params = root.layoutParams as WindowManager.LayoutParams
+            params.width = (320 * density).toInt()
+            params.height = (420 * density).toInt()
+            it.windowManager.updateViewLayout(root, params)
+        }
+        await { root.width == (320 * density).toInt() }
+        instrumentation.runOnMainSync {
+            val left = root.findViewWithTag<View>("recent-searches-column")
+            val right = root.findViewWithTag<View>("recent-tabs-column")
+            assertEquals(left.top, right.top)
+            assertTrue(left.right < right.left)
+            val summary = root.findViewWithTag<View>("search-summary")
+            val summaryBounds = android.graphics.Rect()
+            val historyBounds = android.graphics.Rect()
+            summary.getGlobalVisibleRect(summaryBounds)
+            root.findViewWithTag<View>("search-history").getGlobalVisibleRect(historyBounds)
+            assertTrue("Result summary must separate history from main results", historyBounds.bottom <= summaryBounds.top)
+            assertTrue(historyTabs(root).filterIsInstance<Button>().all { it.width >= (48 * density).toInt() })
+            val list = descendants(root).filterIsInstance<ListView>().single()
+            assertTrue(list.canScrollVertically(1))
+            assertTrue(descendants(root).filterIsInstance<EditText>().single().isShown)
+        }
+        saveOverlay(root, "search-history-overlay-phone.png")
+    }
+
+    @Test fun closedMarkdownSessionKeepsItsFoldsAndScrollWhenReopenedAlongside() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        backToNotes()
+        scenario!!.onActivity { field<MarkdownSurface>(it, "primaryMarkdownSurface").toggleHeading(1) }
+        instrumentation.waitForIdleSync()
+        var state: MarkdownSurface.ReadingState? = null
+        var viewport: MarkdownSurface.ViewportState? = null
+        scenario!!.onActivity {
+            val surface = field<MarkdownSurface>(it, "primaryMarkdownSurface")
+            (surface.getChildAt(0) as ScrollView).scrollTo(0, 900)
+        }
+        instrumentation.waitForIdleSync()
+        scenario!!.onActivity {
+            state = field<Map<ReaderTab, MarkdownSurface.ReadingState>>(it, "markdownReadingStates")[tabs(it)[0]]
+            viewport = field<MarkdownSurface>(it, "primaryMarkdownSurface").captureViewportState()
+            invoke(it, "closeTab", 0)
+        }
+        awaitBook(pdf.id, 11)
+        val root = searchOverlay()
+        instrumentation.runOnMainSync { historyTabs(root).filterIsInstance<Button>().first { it.text.toString() in listOf("◨", "⬒") }.performClick() }
+        awaitReference(note.id, viewport!!.sectionIndex)
+        scenario!!.onActivity {
+            assertTrue(field<MarkdownSurface>(it, "referenceMarkdownSurface").isShowing(state))
+            assertTrue(state!!.folds.sectionModes.isNotEmpty())
+            assertEquals(viewport!!.sectionProgress, state!!.viewport!!.sectionProgress, 0.03f)
+        }
+    }
+
+    @Test fun recentTabTapAndHistorySurviveAColdLaunch() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        scenario!!.onActivity { invoke(it, "jumpCurrentTab", 13) }
+        awaitPrimarySurface()
+        scenario!!.onActivity { invoke(it, "closeTab", 1) }
+        awaitBook(note.id, 0)
+        scenario!!.close()
+        launch()
+        val root = searchOverlay()
+        instrumentation.runOnMainSync { clickRow(historyTabs(root).filterIsInstance<TextView>().first { it.text == "Pazuzu" }) }
+        awaitBook(pdf.id, 13)
+        scenario!!.onActivity { assertEquals(1, tabs(it).size) }
+    }
+
+    @Test fun navigateHistoryRemembersUsedQueriesAndRestoresScopeWithoutSavingTyping() {
+        launch()
+        scenario!!.onActivity { invoke(it, "changeSearchScope", note.id) }
+        val root = searchOverlay("Long section")
+        instrumentation.runOnMainSync {
+            descendants(root).filterIsInstance<TextView>().first { it !is EditText && it.text == "Long section" }
+                .parent.parent.let { (it as View).performClick() }
+        }
+        awaitBook(note.id, 2)
+        val saved = ReaderHistoryRepository(context).searches().single()
+        assertEquals(RecentSearch("Long section", RecentSearchMode.BOOKMARKS, note.id), saved)
+        val next = searchOverlay()
+        instrumentation.runOnMainSync {
+            descendants(next.findViewWithTag("recent-searches-column")).filterIsInstance<TextView>()
+                .first { it.text == "Long section" }.let(::clickRow)
+            val input = descendants(next).filterIsInstance<EditText>().single()
+            assertEquals("Long section", input.text.toString())
+            assertEquals(View.GONE, next.findViewWithTag<View>("search-history").visibility)
+            input.setText("Partial unused query")
+            input.setText("")
+            assertEquals(View.VISIBLE, next.findViewWithTag<View>("search-history").visibility)
+        }
+        assertEquals(listOf(saved), ReaderHistoryRepository(context).searches())
+        scenario!!.onActivity { assertEquals(note.id, field<String>(it, "searchScopeBookId")) }
+    }
+
+    @Test fun recentFullTextSearchRunsWithSavedScopeAndHidesOffTableHistory() {
+        launch()
+        val repository = ReaderHistoryRepository(context)
+        repository.recordSearch("Paragraph", RecentSearchMode.TEXT, note.id)
+        repository.recordSearch("Off table", RecentSearchMode.TEXT, libraryNote.id)
+        repository.recordClosedTabs(listOf(ReaderTab.start(libraryNote.id)))
+        val root = searchOverlay()
+        instrumentation.runOnMainSync {
+            val left = descendants(root.findViewWithTag("recent-searches-column")).filterIsInstance<TextView>().toList()
+            assertFalse(left.any { it.text == "Off table" })
+            assertTrue(historyTabs(root).filterIsInstance<Button>().none { it.text == "+" })
+            clickRow(left.first { it.text == "Paragraph" })
+        }
+        await { var query: String? = null; scenario!!.onActivity {
+            field<Any?>(it, "textSearchSession")?.let { session ->
+                query = session.javaClass.getDeclaredField("query").apply { isAccessible = true }.get(session) as String
+            }
+        }; query == "Paragraph" }
+        scenario!!.onActivity { assertEquals(note.id, field<String>(it, "searchScopeBookId")) }
+    }
+
+    @Test fun paneMovesStayOutOfHistoryAndCloseOthersRecordsTheActiveSessionFirst() {
+        launch()
+        open(WikiLinkSpec("downtime.pdf#page=12", "Pazuzu"))
+        awaitBook(pdf.id, 11)
+        scenario!!.onActivity { invoke(it, "moveTabToReference", 1) }
+        awaitReference(pdf.id, 11)
+        assertTrue(ReaderHistoryRepository(context).closedTabs(mapOf(pdf.id to 20, note.id to note.pageCount)).isEmpty())
+        open(WikiLinkSpec("maps/level 3.jpg"))
+        awaitBook(maps.id, 1)
+        backToNotes()
+        open(WikiLinkSpec("downtime.pdf#page=5", "Earlier"))
+        awaitBook(pdf.id, 4)
+        scenario!!.onActivity { invoke(it, "closeOtherTabs", 1) }
+        awaitBook(maps.id, 1)
+        val closed = ReaderHistoryRepository(context).closedTabs(fixture.associate { it.id to it.pageCount })
+        assertEquals(listOf(pdf.id, note.id), closed.map { it.tab.bookId })
+        assertEquals(4, closed.first().tab.pageIndex)
     }
 
     @Test fun libraryBookPromptCanBeCancelledThenAccepted() {
@@ -334,6 +809,94 @@ class WikiLinkNavigationTest {
         MainActivity::class.java.getDeclaredField(name).apply { isAccessible = true }.get(activity) as T
     private fun tabs(activity: MainActivity) = field<MutableList<ReaderTab>>(activity, "tabs")
     private fun selected(activity: MainActivity) = field<TableSessionController>(activity, "tableSessionController").selectedBookIds
+
+    private fun searchOverlay(query: String = ""): View {
+        scenario!!.onActivity { invoke(it, "showBookmarkSearch", query) }
+        var root: View? = null
+        await {
+            instrumentation.runOnMainSync {
+                root = WindowInspector.getGlobalWindowViews().firstOrNull { descendants(it).any { view -> view is SearchHistoryView } }
+            }
+            root != null
+        }
+        return root!!
+    }
+    private fun historyTabs(root: View): Sequence<View> = descendants(root.findViewWithTag("recent-tabs-column"))
+    private fun clickRow(view: View) {
+        generateSequence(view) { it.parent as? View }.filterIsInstance<SearchResultRow>().first().performClick()
+    }
+    private fun saveOverlay(root: View, name: String = "search-history-overlay.png") = instrumentation.runOnMainSync {
+        InstrumentationRegistry.getArguments().getString("additionalTestOutputDir")?.let { output ->
+            val bitmap = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888)
+            try {
+                root.draw(Canvas(bitmap))
+                File(output).mkdirs()
+                File(output, name).outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            } finally { bitmap.recycle() }
+        }
+    }
+
+    private fun invoke(activity: MainActivity, name: String, vararg args: Any) {
+        val method = MainActivity::class.java.declaredMethods.single { it.name == name && it.parameterCount == args.size }
+        method.isAccessible = true
+        method.invoke(activity, *args)
+    }
+    private fun awaitPrimarySurface() = await {
+        var ready = false
+        scenario!!.onActivity { ready = field<ReaderSurface>(it, "readerSurface").captureViewportState() != null &&
+            field<Set<*>>(it, "primaryPendingPageKeys").isEmpty() }
+        ready
+    }
+    private fun awaitReference(bookId: String, page: Int) = await {
+        var ready = false
+        scenario!!.onActivity {
+            val reference = field<ReaderTab?>(it, "referenceLocation")
+            ready = reference?.bookId == bookId && reference.pageIndex == page &&
+                if (bookId == note.id) field<MarkdownSurface>(it, "referenceMarkdownSurface")
+                    .isShowing(field<Map<ReaderTab, MarkdownSurface.ReadingState>>(it, "markdownReadingStates")[reference])
+                else field<ReaderSurface>(it, "referenceSurface").captureViewportState() != null &&
+                    field<Set<*>>(it, "referencePendingPageKeys").isEmpty()
+        }
+        ready
+    }
+    private fun menuContains(label: Int): Boolean {
+        var menu: ListView? = null
+        await {
+            instrumentation.runOnMainSync {
+                menu = WindowInspector.getGlobalWindowViews().flatMap { descendants(it).toList() }
+                    .filterIsInstance<ListView>().firstOrNull { it.adapter?.count?.let { count ->
+                        (0 until count).any { index -> it.adapter.getItem(index).toString() == context.getString(R.string.close_reference) ||
+                            it.adapter.getItem(index).toString().contains(" · ") }
+                    } == true }
+            }
+            menu != null
+        }
+        var contains = false
+        instrumentation.runOnMainSync { contains = (0 until menu!!.adapter.count).any {
+            menu!!.adapter.getItem(it).toString() == context.getString(label)
+        } }
+        return contains
+    }
+    private fun clickMenuAction(label: Int) {
+        var menu: ListView? = null
+        var position = -1
+        await {
+            instrumentation.runOnMainSync {
+                WindowInspector.getGlobalWindowViews().flatMap { descendants(it).toList() }.filterIsInstance<ListView>().forEach { list ->
+                    val match = (0 until (list.adapter?.count ?: 0)).firstOrNull { list.adapter.getItem(it).toString() == context.getString(label) }
+                    if (match != null) { menu = list; position = match }
+                }
+            }
+            menu != null
+        }
+        instrumentation.runOnMainSync { menu!!.performItemClick(menu!!.getChildAt(position), position, menu!!.adapter.getItemId(position)) }
+        instrumentation.waitForIdleSync()
+    }
+    private fun setZoom(surface: ReaderSurface, zoom: Float) {
+        ReaderSurface::class.java.getDeclaredMethod("restoreViewportState", ReaderSurface.ViewportState::class.java)
+            .apply { isAccessible = true }.invoke(surface, ReaderSurface.ViewportState(zoom, 0.5f, 0.5f))
+        surface.invalidate()
+    }
 
     private fun writePdf(file: File, pages: Int) {
         val output = ByteArrayOutputStream()
